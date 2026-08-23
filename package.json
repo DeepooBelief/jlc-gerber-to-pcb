@@ -1,0 +1,52 @@
+{
+	"name": "jlc-gerber-to-pcb",
+	"type": "module",
+	"version": "0.6.0",
+	"description": "Import RS-274X Gerber and Excellon drill files as editable EasyEDA Pro PCB primitives",
+	"author": "Will",
+	"license": "Apache-2.0",
+	"homepage": "https://github.com/DeepooBelief/jlc-gerber-to-pcb#readme",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/DeepooBelief/jlc-gerber-to-pcb.git"
+	},
+	"bugs": "https://github.com/DeepooBelief/jlc-gerber-to-pcb/issues",
+	"engines": {
+		"node": ">=20.17.0"
+	},
+	"scripts": {
+		"compile": "rimraf ./dist/ && ts-node ./config/esbuild.prod.ts",
+		"lint": "eslint",
+		"fix": "eslint --fix",
+		"test": "node --test tests/*.test.ts",
+		"build": "npm run compile && ts-node ./build/packaged.ts",
+		"debug": "ts-node ./build/dev.ts",
+		"update:check": "ts-node ./build/update.ts check",
+		"update": "ts-node ./build/update.ts update && npm install",
+		"manifest:generate": "npm install && ts-node ./build/manifest.ts generate",
+		"manifest:bump": "npm install && ts-node ./build/manifest.ts bump && npm install"
+	},
+	"devDependencies": {
+		"@antfu/eslint-config": "^5.4.1",
+		"@jlceda/pro-api-types": "^0.4.14",
+		"@types/fs-extra": "^11.0.4",
+		"@types/ws": "^8.5.13",
+		"esbuild": "^0.24.2",
+		"eslint": "^9.37.0",
+		"fs-extra": "^11.3.0",
+		"ignore": "^7.0.3",
+		"jszip": "^3.10.1",
+		"lint-staged": "^16.2.3",
+		"rimraf": "^6.0.1",
+		"simple-git-hooks": "^2.13.1",
+		"ts-node": "^10.9.2",
+		"typescript": "^5.7.3",
+		"ws": "^8.18.0"
+	},
+	"simple-git-hooks": {
+		"pre-commit": "npx lint-staged"
+	},
+	"lint-staged": {
+		"*": "eslint --fix"
+	}
+}

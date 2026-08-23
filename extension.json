@@ -1,0 +1,53 @@
+{
+	"name": "gerber-to-pcb",
+	"uuid": "5f8dc98d9c8b4be2b0c8a1b82fa80765",
+	"displayName": "Gerber 转 PCB",
+	"description": "将 RS-274X Gerber 与 Excellon 钻孔文件重建为可编辑 PCB 图元",
+	"version": "0.6.0",
+	"publisher": "Will",
+	"engines": {
+		"eda": "^3.2.0"
+	},
+	"license": "Apache-2.0",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/DeepooBelief/jlc-gerber-to-pcb.git"
+	},
+	"categories": "PCB",
+	"keywords": [
+		"Gerber",
+		"Excellon",
+		"PCB",
+		"Import"
+	],
+	"images": {
+		"logo": "./images/logo.png"
+	},
+	"homepage": "https://github.com/DeepooBelief/jlc-gerber-to-pcb#readme",
+	"bugs": "https://github.com/DeepooBelief/jlc-gerber-to-pcb/issues",
+	"activationEvents": {},
+	"entry": "./dist/index",
+	"dependentExtensions": {},
+	"headerMenus": {
+		"home": [],
+		"sch": [],
+		"pcb": [
+			{
+				"id": "gerberToPcbMenu",
+				"title": "Gerber 转 PCB",
+				"menuItems": [
+					{
+						"id": "ImportGerber",
+						"title": "导入 Gerber / 钻孔文件...",
+						"registerFn": "importGerber"
+					},
+					{
+						"id": "AboutGerberToPcb",
+						"title": "关于与限制...",
+						"registerFn": "about"
+					}
+				]
+			}
+		]
+	}
+}
