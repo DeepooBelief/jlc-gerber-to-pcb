@@ -8,7 +8,8 @@ export type ApertureShape
 		| { kind: 'rectangle'; width: number; height: number }
 		| { kind: 'roundedRectangle'; width: number; height: number; radius: number; rotation: number }
 		| { kind: 'obround'; width: number; height: number }
-		| { kind: 'polygon'; diameter: number; vertices: number; rotation: number };
+		| { kind: 'polygon'; diameter: number; vertices: number; rotation: number }
+		| { kind: 'customPolygon'; points: Point[]; rotation: number };
 
 export interface Stroke {
 	kind: 'stroke';

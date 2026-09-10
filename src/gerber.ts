@@ -31,6 +31,46 @@ const DEFAULT_FORMAT: CoordinateFormat = {
 	yDecimal: 4,
 };
 
+interface OutlineMacro {
+	points: Point[];
+	rotationExpression: string;
+}
+
+function parseOutlineMacros(source: string): Map<string, OutlineMacro> {
+	const result = new Map<string, OutlineMacro>();
+	for (const match of source.matchAll(/%AM([A-Za-z_]\w*)\*([\s\S]*?)\*%/g)) {
+		const outline = match[2].split('*').map(command => command.trim()).find(command => command.startsWith('4,1,'));
+		if (!outline)
+			continue;
+		const fields = outline.split(',').map(field => field.trim());
+		const coordinateFields = fields.slice(3, -1);
+		if (coordinateFields.length < 6 || coordinateFields.length % 2 !== 0)
+			continue;
+		const coordinates = coordinateFields.map(Number);
+		if (coordinates.some(value => !Number.isFinite(value)))
+			continue;
+		const points: Point[] = [];
+		for (let index = 0; index < coordinates.length; index += 2)
+			points.push({ x: coordinates[index], y: coordinates[index + 1] });
+		result.set(match[1].toUpperCase(), { points, rotationExpression: fields.at(-1) ?? '0' });
+	}
+	return result;
+}
+
+function macroRotation(expression: string, parameters: number[]): number | undefined {
+	const constant = Number(expression);
+	if (Number.isFinite(constant))
+		return constant;
+	const parameter = /^\$(\d+)(?:([+-])([\d.]+))?$/.exec(expression);
+	if (!parameter)
+		return undefined;
+	const value = parameters[Number(parameter[1]) - 1];
+	if (!Number.isFinite(value))
+		return undefined;
+	const offset = Number(parameter[3] ?? 0) * (parameter[2] === '-' ? -1 : 1);
+	return value + offset;
+}
+
 function tokenize(source: string): string[] {
 	const tokens: string[] = [];
 	let buffer = '';
@@ -65,7 +105,7 @@ function coordinate(raw: string, integer: number, decimal: number, zero: 'L' | '
 	return negative ? -result : result;
 }
 
-function parseAperture(command: string, unitScale: number): [number, ApertureShape] | undefined {
+function parseAperture(command: string, unitScale: number, outlineMacros: Map<string, OutlineMacro>): [number, ApertureShape] | undefined {
 	const match = /^ADD(\d+)([A-Z]\w*),(.+)$/i.exec(command);
 	if (!match)
 		return undefined;
@@ -88,6 +128,26 @@ function parseAperture(command: string, unitScale: number): [number, ApertureSha
 			vertices: Math.max(3, Math.round(rawValues[1] || 6)),
 			rotation: rawValues[2] || 0,
 		}];
+	}
+	if (shape === 'ROTRECT' && rawValues.length >= 3) {
+		return [code, {
+			kind: 'roundedRectangle',
+			width: values[0],
+			height: values[1],
+			radius: 0,
+			rotation: rawValues[2],
+		}];
+	}
+	const outlineMacro = outlineMacros.get(shape);
+	if (outlineMacro) {
+		const rotation = macroRotation(outlineMacro.rotationExpression, rawValues);
+		if (rotation !== undefined) {
+			return [code, {
+				kind: 'customPolygon',
+				points: outlineMacro.points.map(point => ({ x: point.x * unitScale, y: point.y * unitScale })),
+				rotation,
+			}];
+		}
 	}
 	if (shape === 'ROUNDRECT' && rawValues.length >= 5) {
 		const compactJlcEda = rawValues.length < 9;
@@ -119,6 +179,11 @@ function parseAperture(command: string, unitScale: number): [number, ApertureSha
 function apertureWidth(shape: ApertureShape): number {
 	if (shape.kind === 'circle' || shape.kind === 'polygon')
 		return shape.diameter;
+	if (shape.kind === 'customPolygon') {
+		const xs = shape.points.map(point => point.x);
+		const ys = shape.points.map(point => point.y);
+		return Math.min(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+	}
 	return Math.min(shape.width, shape.height);
 }
 
@@ -153,6 +218,7 @@ export function parseGerber(source: string): GerberParseResult {
 	const primitives: GerberParseResult['primitives'] = [];
 	const warnings: string[] = [];
 	const apertures = new Map<number, ApertureShape>();
+	const outlineMacros = parseOutlineMacros(source);
 	const state: ParserState = {
 		unitScale: 1,
 		format: { ...DEFAULT_FORMAT },
@@ -190,13 +256,13 @@ export function parseGerber(source: string): GerberParseResult {
 			state.unitScale = 1;
 			continue;
 		}
-		const aperture = parseAperture(command, state.unitScale);
+		const aperture = parseAperture(command, state.unitScale, outlineMacros);
 		if (aperture) {
 			apertures.set(...aperture);
 			continue;
 		}
 		if (/^AM/i.test(command)) {
-			if (!/^AMROUNDRECT$/i.test(command))
+			if (!/^AM(?:ROUNDRECT|ROTRECT)$/i.test(command) && !outlineMacros.has(command.slice(2).toUpperCase()))
 				warnings.push(`检测到暂不支持的自定义孔径宏 ${command.slice(2) || '(未命名)'}。`);
 			continue;
 		}

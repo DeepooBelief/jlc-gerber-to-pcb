@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { parseExcellon } from '../src/excellon.ts';
-import { closedStrokeContours, explicitlyClosePolygon, hatchPolygon, roundedRectanglePercentage, simplifyClosedPolygon, strokePoints } from '../src/geometry.ts';
+import { closedStrokeContours, explicitlyClosePolygon, hatchPolygon, partitionClosedPolygon, roundedRectanglePercentage, simplifyClosedPolygon, strokePoints } from '../src/geometry.ts';
 import { parseGerber } from '../src/gerber.ts';
 import { guessLayer } from '../src/layers.ts';
 import { buildReconstructionIndex, copperShapeAtDrill, hasMaskAtDrill, isCopperFlashAtDrill, isDrilledPosition, isPadDerivedFlash } from '../src/reconstruction.ts';
@@ -93,6 +93,45 @@ M02*`);
 	assert.ok(Math.abs(flash.shape.height - 1.45001) < 0.000001);
 	assert.ok(Math.abs(flash.shape.radius - 0.049215) < 0.000001);
 	assert.ok(Math.abs(flash.shape.rotation) < 0.000001);
+});
+
+test('parses the KiCad RotRect aperture macro convention', () => {
+	const result = parseGerber(`%FSLAX46Y46*%
+%MOMM*%
+%AMRotRect*21,1,$1,$2,0,0,$3*%
+%ADD28RotRect,0.450000X0.500000X60.000000*%
+D28*
+X114760000Y-108902295D03*
+M02*`);
+	assert.equal(result.warnings.length, 0);
+	const flash = result.primitives[0];
+	assert.equal(flash.kind, 'flash');
+	assert.deepEqual(flash.shape, { kind: 'roundedRectangle', width: 0.45, height: 0.5, radius: 0, rotation: 60 });
+});
+
+test('parses a KiCad FreePoly outline macro and its aperture rotation', () => {
+	const result = parseGerber(`%FSLAX46Y46*%
+%MOMM*%
+%AMFreePoly0*
+4,1,4,-0.2,-0.1,0.2,-0.1,0.2,0.1,-0.2,0.1,-0.2,-0.1,$1*%
+%ADD21FreePoly0,270.000000*%
+D21*
+X1000000Y2000000D03*
+M02*`);
+	assert.equal(result.warnings.length, 0);
+	const flash = result.primitives[0];
+	assert.equal(flash.kind, 'flash');
+	assert.deepEqual(flash.shape, {
+		kind: 'customPolygon',
+		points: [
+			{ x: -0.2, y: -0.1 },
+			{ x: 0.2, y: -0.1 },
+			{ x: 0.2, y: 0.1 },
+			{ x: -0.2, y: 0.1 },
+			{ x: -0.2, y: -0.1 },
+		],
+		rotation: 270,
+	});
 });
 
 test('converts physical rounded-rectangle radius to the percentage expected by EDA', () => {
@@ -243,4 +282,23 @@ test('safely reduces very dense closed regions below the EDA fill budget', () =>
 	const result = simplifyClosedPolygon(points);
 	assert.ok(result.points.length <= 900);
 	assert.ok(result.toleranceMm <= 0.005);
+});
+
+test('losslessly partitions a dense detailed region into adjoining EDA-sized polygons', () => {
+	const points = Array.from({ length: 2400 }, (_, index) => {
+		const angle = 2 * Math.PI * index / 2400;
+		const radius = index % 2 ? 10.02 : 10;
+		return { x: radius * Math.cos(angle), y: radius * Math.sin(angle) };
+	});
+	points.push(points[0]);
+	assert.throws(() => simplifyClosedPolygon(points), /无法安全降至 900 个以内/);
+
+	const area = (polygon: typeof points) => Math.abs(polygon.reduce((sum, point, index) => {
+		const next = polygon[(index + 1) % polygon.length];
+		return sum + point.x * next.y - next.x * point.y;
+	}, 0) / 2);
+	const parts = partitionClosedPolygon(points);
+	assert.ok(parts.length > 1);
+	assert.ok(parts.every(part => part.length <= 900));
+	assert.ok(Math.abs(parts.reduce((sum, part) => sum + area(part), 0) - area(points)) / area(points) < 1e-8);
 });

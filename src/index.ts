@@ -166,6 +166,7 @@ export async function importGerber(): Promise<void> {
 			...(result.tentedVias ? [`盖油过孔：${result.tentedVias}`] : []),
 			`过孔：${result.vias}`,
 			...(result.simplifiedRegions ? [`安全简化区域：${result.simplifiedRegions}（最大容差 ${result.maximumSimplificationMicrometers.toFixed(3)} µm）`] : []),
+			...(result.partitionedRegions ? [`无损拆分超限区域：${result.partitionedRegions} 个 Gerber 区域 → ${result.partitionedRegionParts} 个闭合子区域`] : []),
 			...(result.boardOutlineContours ? ['', '请使用“一键导出”确认 EDA 已将闭合 Polyline 识别为板框；公开扩展 API 暂无原生 BoardOutline 创建接口。'] : []),
 			'',
 			'请务必执行 DRC，并与原 Gerber 叠图核对后再用于生产。',
@@ -181,8 +182,8 @@ export function about(): void {
 	eda.sys_Dialog.showInformationMessage([
 		`Gerber 转 PCB v${extensionConfig.version}`,
 		'',
-		'支持：RS-274X 常用 C/R/O/P 孔径、KiCad RoundRect、直线、圆弧、区域，以及 Excellon 圆孔。',
+		'支持：RS-274X 常用 C/R/O/P 孔径、KiCad RoundRect/RotRect/单轮廓 FreePoly、直线、圆弧、区域，以及 Excellon 圆孔。',
 		'',
-		'限制：其它孔径宏、负片清除、步进重复、槽孔和网络/器件语义尚不能完整恢复。',
+		'限制：其它复合孔径宏、负片清除、步进重复、槽孔和网络/器件语义尚不能完整恢复。',
 	].join('\n'), '关于 Gerber 转 PCB');
 }
