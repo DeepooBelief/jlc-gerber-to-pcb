@@ -20,6 +20,7 @@ interface ParserState {
 	region: boolean;
 	regionPoints: Point[];
 	dark: boolean;
+	apertureFunction?: string;
 }
 
 const DEFAULT_FORMAT: CoordinateFormat = {
@@ -119,6 +120,14 @@ function parseAperture(command: string, unitScale: number, outlineMacros: Map<st
 		return [code, { kind: 'circle', diameter: values[0] }];
 	if (shape === 'R')
 		return [code, { kind: 'rectangle', width: values[0], height: values[1] ?? values[0] }];
+	if (shape === 'RECT' && rawValues.length >= 3) {
+		return [code, {
+			kind: 'rectangle',
+			width: values[0],
+			height: values[1],
+			rotation: rawValues[2],
+		}];
+	}
 	if (shape === 'O')
 		return [code, { kind: 'obround', width: values[0], height: values[1] ?? values[0] }];
 	if (shape === 'P') {
@@ -218,6 +227,7 @@ export function parseGerber(source: string): GerberParseResult {
 	const primitives: GerberParseResult['primitives'] = [];
 	const warnings: string[] = [];
 	const apertures = new Map<number, ApertureShape>();
+	const apertureFunctions = new Map<number, string>();
 	const outlineMacros = parseOutlineMacros(source);
 	const state: ParserState = {
 		unitScale: 1,
@@ -259,10 +269,12 @@ export function parseGerber(source: string): GerberParseResult {
 		const aperture = parseAperture(command, state.unitScale, outlineMacros);
 		if (aperture) {
 			apertures.set(...aperture);
+			if (state.apertureFunction)
+				apertureFunctions.set(aperture[0], state.apertureFunction);
 			continue;
 		}
 		if (/^AM/i.test(command)) {
-			if (!/^AM(?:ROUNDRECT|ROTRECT)$/i.test(command) && !outlineMacros.has(command.slice(2).toUpperCase()))
+			if (!/^AM(?:ROUNDRECT|ROTRECT|RECT)$/i.test(command) && !outlineMacros.has(command.slice(2).toUpperCase()))
 				warnings.push(`检测到暂不支持的自定义孔径宏 ${command.slice(2) || '(未命名)'}。`);
 			continue;
 		}
@@ -271,9 +283,18 @@ export function parseGerber(source: string): GerberParseResult {
 			fileFunction = fileAttribute[1];
 			continue;
 		}
+		const apertureFunction = /^TA\.AperFunction,([^,]+)/i.exec(command);
+		if (apertureFunction) {
+			state.apertureFunction = apertureFunction[1];
+			continue;
+		}
+		if (/^TD$/i.test(command)) {
+			state.apertureFunction = undefined;
+			continue;
+		}
 		// X2 attributes may contain reference designators such as Y1 or X1.
 		// They are metadata, never coordinate commands.
-		if (/^T[AFO]\.|^TD$/i.test(command))
+		if (/^T[AFO]\./i.test(command))
 			continue;
 		if (/^LPD$/i.test(command)) {
 			state.dark = true;
@@ -379,7 +400,13 @@ export function parseGerber(source: string): GerberParseResult {
 			continue;
 		}
 		if (state.operation === 3) {
-			primitives.push({ kind: 'flash', position: next, shape: selected });
+			const apertureFunction = state.aperture === undefined ? undefined : apertureFunctions.get(state.aperture);
+			primitives.push({
+				kind: 'flash',
+				position: next,
+				shape: selected,
+				...(apertureFunction ? { apertureFunction } : {}),
+			});
 			continue;
 		}
 		if (state.operation !== 1)

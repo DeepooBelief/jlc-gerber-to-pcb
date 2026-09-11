@@ -2,43 +2,10 @@ import type { ImportPlan } from './model.js';
 import JSZip from 'jszip';
 import extensionConfig from '../extension.json' with { type: 'json' };
 import { parseExcellon } from './excellon.js';
+import { isSupportedManufacturingFile, MANUFACTURING_FILE_EXTENSIONS } from './files.js';
 import { parseGerber } from './gerber.js';
-import { guessLayer, isDrillFile } from './layers.js';
+import { guessLayer, isDrillFile, requiredCopperLayerCount } from './layers.js';
 import { writePlan } from './writer.js';
-
-const EXTENSIONS = [
-	'.zip',
-	'.gbr',
-	'.ger',
-	'.pho',
-	'.art',
-	'.gtl',
-	'.gbl',
-	'.gto',
-	'.gbo',
-	'.gts',
-	'.gbs',
-	'.gtp',
-	'.gbp',
-	'.gko',
-	'.gm1',
-	'.gml',
-	'.g1',
-	'.g2',
-	'.g3',
-	'.cmp',
-	'.sol',
-	'.plc',
-	'.pls',
-	'.stc',
-	'.sts',
-	'.drl',
-	'.drd',
-	'.xln',
-	'.tap',
-	'.exc',
-	'.txt',
-];
 
 interface NamedText {
 	name: string;
@@ -65,7 +32,7 @@ async function expandFiles(files: File[]): Promise<NamedText[]> {
 			if (entry.dir || entry.name.startsWith('__MACOSX/'))
 				continue;
 			const leafName = entry.name.split('/').at(-1) ?? entry.name;
-			if (!EXTENSIONS.some(extension => leafName.toLowerCase().endsWith(extension)) || leafName.toLowerCase().endsWith('.zip'))
+			if (!isSupportedManufacturingFile(leafName))
 				continue;
 			expanded.push({ name: leafName, text: await entry.async('text') });
 		}
@@ -121,10 +88,14 @@ function preview(plan: ImportPlan): string {
 	const warningLines = plan.warnings.slice(0, 8).map(warning => `• ${warning}`);
 	const hiddenWarnings = Math.max(0, plan.warnings.length - warningLines.length);
 	return [
+		'重要：本操作只会追加图元，不会检查或清除当前 PCB 的已有内容。请只在空白 PCB 中导入，否则会产生重叠图形和重复钻孔。',
+		'',
 		'即将把以下内容写入当前 PCB（坐标按原文件保留）：',
 		'',
 		...layerLines,
 		...drillLines,
+		'',
+		`目标铜层数：${requiredCopperLayerCount(plan)}；当前 PCB 层数不足时会在写入前自动扩展，不会自动减少已有叠层。`,
 		...(warningLines.length ? ['', '注意：', ...warningLines] : []),
 		...(hiddenWarnings ? [`• 另有 ${hiddenWarnings} 条警告`] : []),
 		'',
@@ -134,7 +105,7 @@ function preview(plan: ImportPlan): string {
 
 export async function importGerber(): Promise<void> {
 	try {
-		const selected = await eda.sys_FileSystem.openReadFileDialog(EXTENSIONS, true);
+		const selected = await eda.sys_FileSystem.openReadFileDialog(MANUFACTURING_FILE_EXTENSIONS, true);
 		if (!selected?.length)
 			return;
 		const files = await expandFiles(selected);
@@ -147,6 +118,16 @@ export async function importGerber(): Promise<void> {
 			return;
 		eda.sys_Message.showToastMessage('正在重建 PCB 图元，请稍候…');
 		const result = await writePlan(plan);
+		let revealedCopperLayers = false;
+		try {
+			const copperLayers = [...new Set(plan.layers.map(layer => layer.layerId)
+				.filter(layerId => layerId === 1 || layerId === 2 || (layerId >= 15 && layerId <= 44)))];
+			if (copperLayers.length) {
+				revealedCopperLayers = await eda.pcb_Layer.setLayerVisible(copperLayers as TPCB_LayersInTheSelectable[]);
+				await eda.pcb_Layer.setInactiveLayerDisplayMode(EPCB_InactiveLayerDisplayMode.NORMAL_BRIGHTNESS);
+			}
+		}
+		catch {}
 		eda.sys_Dialog.showInformationMessage([
 			'导入完成。',
 			'',
@@ -156,14 +137,16 @@ export async function importGerber(): Promise<void> {
 			`填充：${result.fills}`,
 			`区域填充：${result.regionFills}`,
 			`Flash 填充：${result.flashFills}`,
+			`PCB 铜层数：${result.copperLayerCountBefore} → ${result.copperLayerCountAfter}${result.copperLayerCountAfter > result.copperLayerCountBefore ? '（已自动扩展）' : ''}`,
+			...(revealedCopperLayers ? ['已将全部导入铜层设为可见，并恢复非激活层正常显示。'] : []),
 			...(result.boardOutlineContours ? [`闭合板框轮廓：${result.boardOutlineContours}`] : []),
 			...(result.linearizedArcs ? [`为保证导出而折线化的非铜层圆弧：${result.linearizedArcs}`] : []),
 			...(result.convertedFills ? [`其中闭合折线转换填充：${result.convertedFills}`] : []),
 			...(result.hatchFallbackPrimitives ? [`绝对坐标扫描填充：${result.hatchFallbackPrimitives} 个图元 / ${result.hatchFallbackLines} 条线`] : []),
-			...(result.skippedDerivedFlashes ? [`由原生焊盘自动派生、未重复写入的阻焊/锡膏 flash：${result.skippedDerivedFlashes}`] : []),
+			...(result.skippedDerivedFlashes ? [`由通孔焊盘精确派生、未重复写入的阻焊 flash：${result.skippedDerivedFlashes}`] : []),
 			...(result.skippedInnerCopperFlashes ? [`由过孔/多层焊盘自动派生、未重复写入的内层铜 flash：${result.skippedInnerCopperFlashes}`] : []),
 			...(result.throughHolePads ? [`通孔焊盘：${result.throughHolePads}`] : []),
-			...(result.tentedVias ? [`盖油过孔：${result.tentedVias}`] : []),
+			...(result.tentedVias ? [`已关闭本体自动阻焊开窗的过孔：${result.tentedVias}`] : []),
 			`过孔：${result.vias}`,
 			...(result.simplifiedRegions ? [`安全简化区域：${result.simplifiedRegions}（最大容差 ${result.maximumSimplificationMicrometers.toFixed(3)} µm）`] : []),
 			...(result.partitionedRegions ? [`无损拆分超限区域：${result.partitionedRegions} 个 Gerber 区域 → ${result.partitionedRegionParts} 个闭合子区域`] : []),

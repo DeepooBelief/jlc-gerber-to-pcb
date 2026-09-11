@@ -9,6 +9,19 @@ function pointDistance(left: Point, right: Point): number {
 	return Math.hypot(left.x - right.x, left.y - right.y);
 }
 
+export function rectanglePoints(center: Point, width: number, height: number, rotation = 0): Point[] {
+	const rotationRadians = rotation * Math.PI / 180;
+	return [
+		{ x: -width / 2, y: height / 2 },
+		{ x: width / 2, y: height / 2 },
+		{ x: width / 2, y: -height / 2 },
+		{ x: -width / 2, y: -height / 2 },
+	].map(point => ({
+		x: center.x + point.x * Math.cos(rotationRadians) - point.y * Math.sin(rotationRadians),
+		y: center.y + point.x * Math.sin(rotationRadians) + point.y * Math.cos(rotationRadians),
+	}));
+}
+
 export function strokePoints(stroke: Stroke, maximumArcStepDegrees = 10): Point[] {
 	if (stroke.arcAngle === undefined || !stroke.arcCenter)
 		return [stroke.start, stroke.end];
