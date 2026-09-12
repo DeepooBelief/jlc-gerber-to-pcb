@@ -3,7 +3,7 @@
 	"uuid": "5f8dc98d9c8b4be2b0c8a1b82fa80765",
 	"displayName": "Gerber 转 PCB",
 	"description": "将 RS-274X Gerber 与 Excellon 钻孔文件重建为可编辑 PCB 图元",
-	"version": "0.6.1",
+	"version": "0.7.0",
 	"publisher": "Will",
 	"engines": {
 		"eda": "^3.2.0"

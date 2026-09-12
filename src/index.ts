@@ -5,6 +5,7 @@ import { parseExcellon } from './excellon.js';
 import { isSupportedManufacturingFile, MANUFACTURING_FILE_EXTENSIONS } from './files.js';
 import { parseGerber } from './gerber.js';
 import { guessLayer, isDrillFile, requiredCopperLayerCount } from './layers.js';
+import { ImportProgress } from './progress.js';
 import { writePlan } from './writer.js';
 
 interface NamedText {
@@ -20,9 +21,10 @@ function confirmation(content: string): Promise<boolean> {
 	});
 }
 
-async function expandFiles(files: File[]): Promise<NamedText[]> {
+async function expandFiles(files: File[], progress: ImportProgress): Promise<NamedText[]> {
 	const expanded: NamedText[] = [];
 	for (const file of files) {
+		await progress.update(0, `读取 / 解压：${file.name}`, true);
 		if (!file.name.toLowerCase().endsWith('.zip')) {
 			expanded.push({ name: file.name, text: await file.text() });
 			continue;
@@ -35,6 +37,7 @@ async function expandFiles(files: File[]): Promise<NamedText[]> {
 			if (!isSupportedManufacturingFile(leafName))
 				continue;
 			expanded.push({ name: leafName, text: await entry.async('text') });
+			await progress.update(0, `解压：${leafName}（已读取 ${expanded.length} 个文件）`);
 		}
 	}
 	return expanded;
@@ -48,9 +51,10 @@ function looksLikeExcellon(text: string): boolean {
 	return /M48/i.test(text) && /T\d+C[0-9.]+/i.test(text);
 }
 
-function createPlan(files: NamedText[]): ImportPlan {
+async function createPlan(files: NamedText[], progress: ImportProgress): Promise<ImportPlan> {
 	const plan: ImportPlan = { layers: [], drills: [], warnings: [] };
-	for (const file of files) {
+	for (const [index, file] of files.entries()) {
+		await progress.update(5 + 10 * index / Math.max(1, files.length), `解析 ${index + 1}/${files.length}：${file.name}`, true);
 		if (isDrillFile(file.name) || looksLikeExcellon(file.text)) {
 			const result = parseExcellon(file.text);
 			plan.drills.push({ fileName: file.name, result });
@@ -103,21 +107,32 @@ function preview(plan: ImportPlan): string {
 	].join('\n');
 }
 
+let importing = false;
+
 export async function importGerber(): Promise<void> {
+	if (importing) {
+		eda.sys_Message.showToastMessage('已有导入任务正在进行，请等待完成。');
+		return;
+	}
+	importing = true;
+	const progress = new ImportProgress();
 	try {
 		const selected = await eda.sys_FileSystem.openReadFileDialog(MANUFACTURING_FILE_EXTENSIONS, true);
 		if (!selected?.length)
 			return;
-		const files = await expandFiles(selected);
-		const plan = createPlan(files);
+		const files = await expandFiles(selected, progress);
+		const plan = await createPlan(files, progress);
+		await progress.close();
 		if (!plan.layers.length && !plan.drills.some(drill => drill.result.hits.length)) {
 			eda.sys_Dialog.showInformationMessage(`没有发现可导入的图形。\n\n${plan.warnings.join('\n')}`, 'Gerber 转 PCB');
 			return;
 		}
 		if (!await confirmation(preview(plan)))
 			return;
-		eda.sys_Message.showToastMessage('正在重建 PCB 图元，请稍候…');
-		const result = await writePlan(plan);
+		await progress.update(15, '建立钻孔与图层索引', true);
+		const result = await writePlan(plan, (completed, total, detail, force) =>
+			progress.update(15 + 80 * completed / Math.max(1, total), detail, force));
+		await progress.update(97, '整理图层显示与导入统计', true);
 		let revealedCopperLayers = false;
 		try {
 			const copperLayers = [...new Set(plan.layers.map(layer => layer.layerId)
@@ -128,6 +143,7 @@ export async function importGerber(): Promise<void> {
 			}
 		}
 		catch {}
+		await progress.close();
 		eda.sys_Dialog.showInformationMessage([
 			'导入完成。',
 			'',
@@ -156,8 +172,13 @@ export async function importGerber(): Promise<void> {
 		].join('\n'), 'Gerber 转 PCB');
 	}
 	catch (error) {
+		await progress.close();
 		const message = error instanceof Error ? error.message : String(error);
 		eda.sys_Dialog.showInformationMessage(`导入失败；本次已创建的图元已尝试回滚。\n\n${message}`, 'Gerber 转 PCB');
+	}
+	finally {
+		await progress.close();
+		importing = false;
 	}
 }
 
