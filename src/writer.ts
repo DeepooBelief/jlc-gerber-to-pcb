@@ -1,7 +1,8 @@
-import type { ApertureShape, ImportPlan, Point } from './model.js';
+import type { ApertureShape, ImportPlan, Point, Stroke } from './model.js';
 import type { ReportProgress } from './progress.js';
 import type { ReconstructionIndex } from './reconstruction.js';
-import { closedStrokeContours, explicitlyClosePolygon, hatchPolygon, partitionClosedPolygon, rectanglePoints, roundedRectanglePercentage, simplifyClosedPolygon, strokePoints } from './geometry.js';
+import { createDrilledPad, createNonPlatedHole } from './drills.js';
+import { closedStrokeContours, connectedStrokeComponents, explicitlyClosePolygon, hatchPolygon, partitionClosedPolygon, rectanglePoints, roundedRectanglePercentage, simplifyClosedPolygon, strokePoints } from './geometry.js';
 import { copperLayerCountFromLayers, requiredCopperLayerCount } from './layers.js';
 import { buildReconstructionIndex, copperShapeAtDrill, hasMaskAtDrill, isCopperFlashAtDrill, isNativePadShape, isPadDerivedFlash, maskExpansionForPad } from './reconstruction.js';
 
@@ -228,10 +229,12 @@ export interface WriteSummary {
 	hatchFallbackPrimitives: number;
 	hatchFallbackLines: number;
 	boardOutlineContours: number;
+	openBoardStrokes: number;
 	linearizedArcs: number;
 	skippedDerivedFlashes: number;
 	skippedInnerCopperFlashes: number;
 	throughHolePads: number;
+	slottedHoles: number;
 	tentedVias: number;
 	vias: number;
 	simplifiedRegions: number;
@@ -363,10 +366,12 @@ export async function writePlan(plan: ImportPlan, report?: ReportProgress): Prom
 	let regionFills = 0;
 	let flashFills = 0;
 	let boardOutlineContours = 0;
+	let openBoardStrokes = 0;
 	let linearizedArcs = 0;
 	let skippedDerivedFlashes = 0;
 	let skippedInnerCopperFlashes = 0;
 	let throughHolePads = 0;
+	let slottedHoles = 0;
 	let tentedVias = 0;
 	let partitionedRegions = 0;
 	let partitionedRegionParts = 0;
@@ -396,25 +401,47 @@ export async function writePlan(plan: ImportPlan, report?: ReportProgress): Prom
 				activeContext = `${layer.fileName}（EDA 板框层）`;
 				await status('组装闭合板框');
 				const strokes = layer.result.primitives.filter(primitive => primitive.kind === 'stroke');
-				const contours = [
-					...closedStrokeContours(strokes),
-					...layer.result.primitives.filter(primitive => primitive.kind === 'region').map(region => explicitlyClosePolygon(region.points)),
-				];
+				const contours: Array<{ points: Point[]; width: number }> = [];
+				const openStrokes: Stroke[] = [];
+				let outlineError: unknown;
+				for (const component of connectedStrokeComponents(strokes)) {
+					try {
+						contours.push(...closedStrokeContours(component).map(points => ({ points, width: component[0].width })));
+					}
+					catch (error) {
+						outlineError ??= error;
+						openStrokes.push(...component);
+					}
+				}
+				contours.push(...layer.result.primitives
+					.filter(primitive => primitive.kind === 'region')
+					.map(region => ({ points: explicitlyClosePolygon(region.points), width: 0.05 })));
 				if (!contours.length && layer.result.primitives.length)
-					throw new Error('未能从板框 Gerber 组装出闭合轮廓。');
-				const lineWidth = Math.max(0.1, mil(strokes[0]?.width ?? 0.05));
+					throw outlineError instanceof Error ? outlineError : new Error('未能从板框 Gerber 组装出闭合轮廓。');
 				for (const contour of contours) {
-					await status(`写入板框轮廓（${contour.length} 顶点）`);
-					const polygon = eda.pcb_MathPolygon.createPolygon(polygonSource(contour));
+					await status(`写入板框轮廓（${contour.points.length} 顶点）`);
+					const polygon = eda.pcb_MathPolygon.createPolygon(polygonSource(contour.points));
 					if (!polygon)
 						throw new Error('无法创建闭合板框多边形。');
-					const polyline = await eda.pcb_PrimitivePolyline.create('', 11, polygon, lineWidth, false);
+					const polyline = await eda.pcb_PrimitivePolyline.create('', 11, polygon, Math.max(0.1, mil(contour.width)), false);
 					const id = primitiveId(polyline);
 					if (!id)
 						throw new Error('无法创建闭合板框折线。');
 					created.polylines.push(id);
 					boardOutlineContours += 1;
 				}
+				for (const stroke of openStrokes) {
+					await status('保留开放板框/机械路径');
+					const points = stroke.arcAngle === undefined ? [stroke.start, stroke.end] : strokePoints(stroke);
+					for (let index = 1; index < points.length; index += 1) {
+						const id = primitiveId(await eda.pcb_PrimitiveLine.create('', 11, mil(points[index - 1].x), mil(points[index - 1].y), mil(points[index].x), mil(points[index].y), Math.max(0.1, mil(stroke.width)), false));
+						if (id)
+							created.lines.push(id);
+					}
+					if (stroke.arcAngle !== undefined)
+						linearizedArcs += 1;
+				}
+				openBoardStrokes += openStrokes.length;
 				completed += layer.result.primitives.length;
 				continue;
 			}
@@ -507,11 +534,12 @@ export async function writePlan(plan: ImportPlan, report?: ReportProgress): Prom
 				completed = drillStart + hitIndex;
 				await notify(completed, total, `${activeContext} · 总进度 ${completed}/${total} · 当前文件 ${hitIndex + 1}/${drill.result.hits.length}`);
 				if (hit.plated === false) {
-					const diameter = mil(hit.diameter);
-					const id = primitiveId(await eda.pcb_PrimitivePad.create(12, '', mil(hit.position.x), mil(hit.position.y), 0, [EPCB_PrimitivePadShapeType.ELLIPSE, diameter, diameter], '', [EPCB_PrimitivePadHoleType.ROUND, diameter], 0, 0, 0, false, EPCB_PrimitivePadType.NORMAL, undefined, null, null, false));
+					const id = primitiveId(await createNonPlatedHole(hit));
 					if (id) {
 						created.pads.push(id);
 						throughHolePads += 1;
+						if (hit.slot)
+							slottedHoles += 1;
 					}
 					continue;
 				}
@@ -522,15 +550,18 @@ export async function writePlan(plan: ImportPlan, report?: ReportProgress): Prom
 				const drillFunction = hit.drillFunction?.toLowerCase();
 				const knownVia = drillFunction === 'viadrill';
 				const knownComponent = drillFunction === 'componentdrill';
-				if (knownComponent || (!knownVia && copperShape && hasMaskAtDrill(reconstruction, hit.position))) {
-					const throughHoleShape: ApertureShape = copperShape && isNativePadShape(copperShape)
-						? copperShape
-						: { kind: 'circle', diameter: annularDiameter };
-					const diameter = mil(hit.diameter);
-					const id = primitiveId(await eda.pcb_PrimitivePad.create(12, '', mil(hit.position.x), mil(hit.position.y), shapeRotation(throughHoleShape), padShape(throughHoleShape), '', [EPCB_PrimitivePadHoleType.ROUND, diameter], 0, 0, 0, true, EPCB_PrimitivePadType.NORMAL, undefined, throughHoleMaskExpansion(reconstruction, hit.position, throughHoleShape), null, false));
+				if (hit.slot || knownComponent || (!knownVia && copperShape && hasMaskAtDrill(reconstruction, hit.position))) {
+					const nativeCopperShape = copperShape && isNativePadShape(copperShape) ? copperShape : undefined;
+					const throughHoleShape: ApertureShape = nativeCopperShape || (hit.slot
+						? { kind: 'obround', width: hit.slot.length, height: annularDiameter }
+						: { kind: 'circle', diameter: annularDiameter });
+					const padRotation = nativeCopperShape ? shapeRotation(throughHoleShape) : hit.slot?.rotation ?? 0;
+					const id = primitiveId(await createDrilledPad(hit, padRotation, padShape(throughHoleShape), true, throughHoleMaskExpansion(reconstruction, hit.position, throughHoleShape)));
 					if (id) {
 						created.pads.push(id);
 						throughHolePads += 1;
+						if (hit.slot)
+							slottedHoles += 1;
 					}
 					continue;
 				}
@@ -574,10 +605,12 @@ export async function writePlan(plan: ImportPlan, report?: ReportProgress): Prom
 		hatchFallbackPrimitives,
 		hatchFallbackLines,
 		boardOutlineContours,
+		openBoardStrokes,
 		linearizedArcs,
 		skippedDerivedFlashes,
 		skippedInnerCopperFlashes,
 		throughHolePads,
+		slottedHoles,
 		tentedVias,
 		vias: created.vias.length,
 		simplifiedRegions,

@@ -43,6 +43,11 @@ export interface GerberParseResult {
 export interface DrillHit {
 	position: Point;
 	diameter: number;
+	slot?: {
+		/** Overall finished slot length, including the semicircular ends. */
+		length: number;
+		rotation: number;
+	};
 	plated?: boolean;
 	drillFunction?: string;
 }
