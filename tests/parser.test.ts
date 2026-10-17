@@ -7,6 +7,19 @@ import { parseGerber } from '../src/gerber.ts';
 import { copperLayerCountFromLayers, guessLayer, requiredCopperLayerCount } from '../src/layers.ts';
 import { buildReconstructionIndex, copperShapeAtDrill, hasMaskAtDrill, isCopperFlashAtDrill, isDrilledPosition, isNativePadShape, isPadDerivedFlash, maskExpansionForPad } from '../src/reconstruction.ts';
 
+test('NPTH masks remain explicit even when ComponentDrill has matching copper', () => {
+	const position = { x: 10, y: 20 };
+	const shape = { kind: 'circle' as const, diameter: 1.2 };
+	const index = {
+		drillHits: [{ position, diameter: 1.2, plated: false, drillFunction: 'ComponentDrill' }],
+		drillPositions: [position],
+		copperFlashes: [1, 2].map(layerId => ({ position, shape, layerId })),
+		maskFlashes: [5, 6].map(layerId => ({ position, shape, layerId })),
+	};
+	for (const layer of [5, 6])
+		assert.equal(isPadDerivedFlash(index, layer, { kind: 'flash', position, shape }), false);
+});
+
 test('parses RS-274X lines, flashes, regions, and metric coordinates', () => {
 	const source = `%FSLAX24Y24*%
 %MOMM*%
@@ -66,6 +79,56 @@ X30.0Y40.0
 M30`);
 	assert.equal(result.hits[0].drillFunction, 'ViaDrill');
 	assert.equal(result.hits[1].drillFunction, 'ComponentDrill');
+});
+
+test('parses KiCad M15/G01 routed slots as one centered native slot', () => {
+	const result = parseExcellon(`M48
+; #@! TF.FileFunction,Plated,1,2,PTH
+; #@! TA.AperFunction,Plated,PTH,ComponentDrill
+T1C0.400
+%
+G90
+G05
+T1
+G00X10.0Y20.0
+M15
+G01X10.0Y21.0
+M16
+G05
+X30.0Y40.0
+M30`);
+	assert.equal(result.warnings.length, 0);
+	assert.equal(result.hits.length, 2);
+	assert.deepEqual(result.hits[0], {
+		position: { x: 10, y: 20.5 },
+		diameter: 0.4,
+		slot: { length: 1.4, rotation: 90 },
+		plated: true,
+		drillFunction: 'ComponentDrill',
+	});
+	assert.deepEqual(result.hits[1], {
+		position: { x: 30, y: 40 },
+		diameter: 0.4,
+		plated: true,
+		drillFunction: 'ComponentDrill',
+	});
+});
+
+test('parses G85 slots with start and end coordinates', () => {
+	const result = parseExcellon(`M48
+METRIC
+T1C0.600
+%
+T1
+X10.0Y20.0G85X12.0Y20.0
+M30`);
+	assert.equal(result.warnings.length, 0);
+	assert.deepEqual(result.hits, [{
+		position: { x: 11, y: 20 },
+		diameter: 0.6,
+		slot: { length: 2.6, rotation: 0 },
+		plated: undefined,
+	}]);
 });
 
 test('keeps Gerber X2 aperture functions on flashes', () => {

@@ -41,27 +41,70 @@ export function strokePoints(stroke: Stroke, maximumArcStepDegrees = 10): Point[
 	return points;
 }
 
+function strokesTouch(left: Stroke, right: Stroke, toleranceMm: number): boolean {
+	return [left.start, left.end].some(leftPoint => [right.start, right.end]
+		.some(rightPoint => pointDistance(leftPoint, rightPoint) <= toleranceMm));
+}
+
+/** Split disconnected outline geometry before deciding whether each path is closed. */
+export function connectedStrokeComponents(strokes: Stroke[], toleranceMm = 0.005): Stroke[][] {
+	const remaining = new Set(strokes
+		.map((stroke, index) => ({ stroke, index }))
+		.filter(({ stroke }) => stroke.arcAngle !== undefined || !samePoint(stroke.start, stroke.end))
+		.map(({ index }) => index));
+	const components: Stroke[][] = [];
+	while (remaining.size) {
+		const first = remaining.values().next().value!;
+		remaining.delete(first);
+		const indices = [first];
+		for (let cursor = 0; cursor < indices.length; cursor += 1) {
+			for (const candidate of [...remaining]) {
+				if (!strokesTouch(strokes[indices[cursor]], strokes[candidate], toleranceMm))
+					continue;
+				remaining.delete(candidate);
+				indices.push(candidate);
+			}
+		}
+		components.push(indices.map(index => strokes[index]));
+	}
+	return components;
+}
+
 export function closedStrokeContours(strokes: Stroke[], toleranceMm = 0.005): Point[][] {
 	const contours: Point[][] = [];
-	let chain: Point[] = [];
-	const finish = () => {
-		if (chain.length >= 4 && pointDistance(chain[0], chain.at(-1)!) <= toleranceMm) {
-			chain[chain.length - 1] = { ...chain[0] };
-			contours.push(explicitlyClosePolygon(chain));
+	// A Gerber D01 at the current position is not an outline edge. Do not
+	// apply the endpoint-only test to arcs: full circles share their endpoints.
+	const remaining = new Map(strokes
+		.filter(stroke => stroke.arcAngle !== undefined || !samePoint(stroke.start, stroke.end))
+		.map((stroke, index) => [index, strokePoints(stroke)]));
+	while (remaining.size) {
+		const [firstId, first] = remaining.entries().next().value!;
+		remaining.delete(firstId);
+		const chain = [...first];
+		while (true) {
+			const end = chain.at(-1)!;
+			const closed = chain.length >= 4 && pointDistance(chain[0], end) <= toleranceMm;
+			const matches: Array<{ id: number; points: Point[] }> = [];
+			for (const [id, points] of remaining) {
+				if (pointDistance(end, points[0]) <= toleranceMm)
+					matches.push({ id, points });
+				if (pointDistance(end, points.at(-1)!) <= toleranceMm)
+					matches.push({ id, points: [...points].reverse() });
+			}
+			if (matches.length > 1 || (closed && matches.length))
+				throw new Error(`板框端点 (${end.x}, ${end.y}) 存在分叉或重叠，无法唯一拼接。`);
+			if (closed) {
+				chain[chain.length - 1] = { ...chain[0] };
+				contours.push(explicitlyClosePolygon(chain));
+				break;
+			}
+			if (!matches.length)
+				throw new Error(`板框端点 (${end.x}, ${end.y}) 存在缺口，${toleranceMm * 1000} µm 容差内找不到相接线段。`);
+			const match = matches[0];
+			remaining.delete(match.id);
+			chain.push(...match.points.slice(1));
 		}
-		chain = [];
-	};
-	for (const stroke of strokes) {
-		const segment = strokePoints(stroke);
-		if (!chain.length) {
-			chain = segment;
-			continue;
-		}
-		if (pointDistance(chain.at(-1)!, segment[0]) > toleranceMm)
-			finish();
-		chain.push(...(chain.length ? segment.slice(1) : segment));
 	}
-	finish();
 	return contours;
 }
 

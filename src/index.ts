@@ -83,7 +83,8 @@ function preview(plan: ImportPlan): string {
 	});
 	const drillLines = plan.drills.map((drill) => {
 		const kind = drill.result.plated === false ? '非金属化孔' : '通孔过孔';
-		return `• ${drill.fileName} → ${kind}: ${drill.result.hits.length}`;
+		const slots = drill.result.hits.filter(hit => hit.slot).length;
+		return `• ${drill.fileName} → ${kind}: ${drill.result.hits.length}${slots ? `（其中槽孔 ${slots}）` : ''}`;
 	});
 	const warningLines = plan.warnings.slice(0, 8).map(warning => `• ${warning}`);
 	const hiddenWarnings = Math.max(0, plan.warnings.length - warningLines.length);
@@ -140,17 +141,19 @@ export async function importGerber(): Promise<void> {
 			`PCB 铜层数：${result.copperLayerCountBefore} → ${result.copperLayerCountAfter}${result.copperLayerCountAfter > result.copperLayerCountBefore ? '（已自动扩展）' : ''}`,
 			...(revealedCopperLayers ? ['已将全部导入铜层设为可见，并恢复非激活层正常显示。'] : []),
 			...(result.boardOutlineContours ? [`闭合板框轮廓：${result.boardOutlineContours}`] : []),
+			...(result.openBoardStrokes ? [`板框层开放机械线/弧：${result.openBoardStrokes}（已保留，请核对用途）`] : []),
 			...(result.linearizedArcs ? [`为保证导出而折线化的非铜层圆弧：${result.linearizedArcs}`] : []),
 			...(result.convertedFills ? [`其中闭合折线转换填充：${result.convertedFills}`] : []),
 			...(result.hatchFallbackPrimitives ? [`绝对坐标扫描填充：${result.hatchFallbackPrimitives} 个图元 / ${result.hatchFallbackLines} 条线`] : []),
 			...(result.skippedDerivedFlashes ? [`由通孔焊盘精确派生、未重复写入的阻焊 flash：${result.skippedDerivedFlashes}`] : []),
 			...(result.skippedInnerCopperFlashes ? [`由过孔/多层焊盘自动派生、未重复写入的内层铜 flash：${result.skippedInnerCopperFlashes}`] : []),
 			...(result.throughHolePads ? [`通孔焊盘：${result.throughHolePads}`] : []),
+			...(result.slottedHoles ? [`其中槽孔：${result.slottedHoles}`] : []),
 			...(result.tentedVias ? [`已关闭本体自动阻焊开窗的过孔：${result.tentedVias}`] : []),
 			`过孔：${result.vias}`,
 			...(result.simplifiedRegions ? [`安全简化区域：${result.simplifiedRegions}（最大容差 ${result.maximumSimplificationMicrometers.toFixed(3)} µm）`] : []),
 			...(result.partitionedRegions ? [`无损拆分超限区域：${result.partitionedRegions} 个 Gerber 区域 → ${result.partitionedRegionParts} 个闭合子区域`] : []),
-			...(result.boardOutlineContours ? ['', '请使用“一键导出”确认 EDA 已将闭合 Polyline 识别为板框；公开扩展 API 暂无原生 BoardOutline 创建接口。'] : []),
+			...(result.boardOutlineContours ? ['', `请使用“一键导出”确认 EDA 已将闭合 Polyline 识别为板框${result.openBoardStrokes ? '，并重点检查开放机械路径是否应参与加工' : ''}；公开扩展 API 暂无原生 BoardOutline 创建接口。`] : []),
 			'',
 			'请务必执行 DRC，并与原 Gerber 叠图核对后再用于生产。',
 		].join('\n'), 'Gerber 转 PCB');
@@ -165,8 +168,8 @@ export function about(): void {
 	eda.sys_Dialog.showInformationMessage([
 		`Gerber 转 PCB v${extensionConfig.version}`,
 		'',
-		'支持：RS-274X 常用 C/R/O/P 孔径、KiCad RoundRect/RotRect/单轮廓 FreePoly、直线、圆弧、区域，以及 Excellon 圆孔。',
+		'支持：RS-274X 常用 C/R/O/P 孔径、KiCad RoundRect/RotRect/单轮廓 FreePoly、直线、圆弧、区域，以及 Excellon 圆孔和直槽。',
 		'',
-		'限制：其它复合孔径宏、负片清除、步进重复、槽孔和网络/器件语义尚不能完整恢复。',
+		'限制：其它复合孔径宏、负片清除、步进重复、曲线路由槽和网络/器件语义尚不能完整恢复。',
 	].join('\n'), '关于 Gerber 转 PCB');
 }

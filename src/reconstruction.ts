@@ -156,6 +156,8 @@ export function isPadDerivedFlash(index: ReconstructionIndex, layerId: number, f
 	if (copperLayer === undefined)
 		return false;
 	const hasNativeThroughHolePad = index.drillHits.some((hit) => {
+		if (hit.plated === false)
+			return false;
 		if (!samePosition(hit.position, flash.position))
 			return false;
 		const drillFunction = hit.drillFunction?.toLowerCase();
