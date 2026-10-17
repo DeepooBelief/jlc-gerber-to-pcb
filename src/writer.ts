@@ -1,4 +1,5 @@
 import type { ApertureShape, ImportPlan, Point, Stroke } from './model.js';
+import type { ReportProgress } from './progress.js';
 import type { ReconstructionIndex } from './reconstruction.js';
 import { createDrilledPad, createNonPlatedHole } from './drills.js';
 import { closedStrokeContours, connectedStrokeComponents, explicitlyClosePolygon, hatchPolygon, partitionClosedPolygon, rectanglePoints, roundedRectanglePercentage, simplifyClosedPolygon, strokePoints } from './geometry.js';
@@ -242,10 +243,11 @@ export interface WriteSummary {
 	partitionedRegionParts: number;
 }
 
-async function createAbsoluteHatch(layerId: number, points: Point[], created: CreatedIds): Promise<number> {
+async function createAbsoluteHatch(layerId: number, points: Point[], created: CreatedIds, status: (detail: string) => Promise<void>): Promise<number> {
 	const segments = hatchPolygon(points);
 	const batchSize = 100;
 	for (let offset = 0; offset < segments.length; offset += batchSize) {
+		await status(`扫描线回退 ${offset}/${segments.length}`);
 		const batch = segments.slice(offset, offset + batchSize);
 		const results = await Promise.allSettled(batch.map(segment => eda.pcb_PrimitiveLine.create(
 			'',
@@ -305,7 +307,7 @@ interface PolygonWriteResult {
 	hatchLines: number;
 }
 
-async function createPolygonGraphic(layerId: number, source: TPCB_PolygonSourceArray, fallbackPoints: Point[], created: CreatedIds): Promise<PolygonWriteResult> {
+async function createPolygonGraphic(layerId: number, source: TPCB_PolygonSourceArray, fallbackPoints: Point[], created: CreatedIds, status: (detail: string) => Promise<void>): Promise<PolygonWriteResult> {
 	const polygon = eda.pcb_MathPolygon.createPolygon(source);
 	if (!polygon)
 		throw new Error('无法创建多边形。');
@@ -323,12 +325,14 @@ async function createPolygonGraphic(layerId: number, source: TPCB_PolygonSourceA
 		fillError = error;
 	}
 	try {
+		await status('直接填充未成功，尝试闭合折线转填充');
 		if (await createConvertedFill(layerId, polygon, created))
 			return { kind: 'converted', hatchLines: 0 };
 	}
 	catch {}
 	if (isHatchLayer(layerId)) {
-		const hatchLines = await createAbsoluteHatch(layerId, fallbackPoints, created);
+		await status('准备扫描线回退');
+		const hatchLines = await createAbsoluteHatch(layerId, fallbackPoints, created, status);
 		if (hatchLines)
 			return { kind: 'hatch', hatchLines };
 	}
@@ -336,10 +340,24 @@ async function createPolygonGraphic(layerId: number, source: TPCB_PolygonSourceA
 	throw new Error(`普通填充失败，且当前图层无法完成绝对坐标扫描回退：${fillMessage}`);
 }
 
-export async function writePlan(plan: ImportPlan): Promise<WriteSummary> {
+export async function writePlan(plan: ImportPlan, report?: ReportProgress): Promise<WriteSummary> {
 	const created: CreatedIds = { lines: [], arcs: [], pads: [], fills: [], polylines: [], vias: [] };
+	const total = plan.layers.reduce((sum, layer) => sum + layer.result.primitives.length, 0)
+		+ plan.drills.reduce((sum, drill) => sum + drill.result.hits.length, 0);
+	let completed = 0;
+	// Progress is observational: a UI failure must never affect writing or rollback.
+	const notify: ReportProgress = async (done, count, detail, force) => {
+		try {
+			await report?.(done, count, detail, force);
+		}
+		catch {}
+	};
+	await notify(0, total, '建立钻孔与图层索引', true);
 	const reconstruction = buildReconstructionIndex(plan);
 	let activeContext = '初始化导入';
+	const status = async (detail: string): Promise<void> => {
+		await notify(completed, total, `${activeContext} · ${detail}`, true);
+	};
 	let simplifiedRegions = 0;
 	let maximumSimplificationMicrometers = 0;
 	let hatchFallbackPrimitives = 0;
@@ -362,11 +380,13 @@ export async function writePlan(plan: ImportPlan): Promise<WriteSummary> {
 	let expandedCopperLayers = false;
 	try {
 		activeContext = '检查当前 PCB 铜层叠层';
+		await status('读取叠层');
 		copperLayerCountBefore = await readCopperLayerCount();
 		copperLayerCountAfter = copperLayerCountBefore;
 		const requiredLayers = requiredCopperLayerCount(plan);
 		if (copperLayerCountBefore < requiredLayers) {
 			activeContext = `将当前 PCB 从 ${copperLayerCountBefore} 层扩展为 ${requiredLayers} 层`;
+			await status('更新叠层');
 			if (!await eda.pcb_Layer.setTheNumberOfCopperLayers(requiredLayers))
 				throw new Error('无法调整当前 PCB 的铜层数，请先在层叠管理器中手动设置。');
 			expandedCopperLayers = true;
@@ -375,8 +395,11 @@ export async function writePlan(plan: ImportPlan): Promise<WriteSummary> {
 				throw new Error(`层数调整后读回为 ${copperLayerCountAfter} 层，未达到 Gerber 所需的 ${requiredLayers} 层。`);
 		}
 		for (const layer of plan.layers) {
+			const layerStart = completed;
+			await notify(completed, total, `处理图层：${layer.fileName}（EDA 图层 ${layer.layerId}）`, true);
 			if (layer.layerId === 11) {
 				activeContext = `${layer.fileName}（EDA 板框层）`;
+				await status('组装闭合板框');
 				const strokes = layer.result.primitives.filter(primitive => primitive.kind === 'stroke');
 				const contours: Array<{ points: Point[]; width: number }> = [];
 				const openStrokes: Stroke[] = [];
@@ -396,6 +419,7 @@ export async function writePlan(plan: ImportPlan): Promise<WriteSummary> {
 				if (!contours.length && layer.result.primitives.length)
 					throw outlineError instanceof Error ? outlineError : new Error('未能从板框 Gerber 组装出闭合轮廓。');
 				for (const contour of contours) {
+					await status(`写入板框轮廓（${contour.points.length} 顶点）`);
 					const polygon = eda.pcb_MathPolygon.createPolygon(polygonSource(contour.points));
 					if (!polygon)
 						throw new Error('无法创建闭合板框多边形。');
@@ -407,6 +431,7 @@ export async function writePlan(plan: ImportPlan): Promise<WriteSummary> {
 					boardOutlineContours += 1;
 				}
 				for (const stroke of openStrokes) {
+					await status('保留开放板框/机械路径');
 					const points = stroke.arcAngle === undefined ? [stroke.start, stroke.end] : strokePoints(stroke);
 					for (let index = 1; index < points.length; index += 1) {
 						const id = primitiveId(await eda.pcb_PrimitiveLine.create('', 11, mil(points[index - 1].x), mil(points[index - 1].y), mil(points[index].x), mil(points[index].y), Math.max(0.1, mil(stroke.width)), false));
@@ -417,10 +442,13 @@ export async function writePlan(plan: ImportPlan): Promise<WriteSummary> {
 						linearizedArcs += 1;
 				}
 				openBoardStrokes += openStrokes.length;
+				completed += layer.result.primitives.length;
 				continue;
 			}
 			for (const [primitiveIndex, primitive] of layer.result.primitives.entries()) {
 				activeContext = `${layer.fileName}（EDA 图层 ${layer.layerId}）第 ${primitiveIndex + 1} 个 ${primitive.kind} 图元`;
+				completed = layerStart + primitiveIndex;
+				await notify(completed, total, `${activeContext} · 总进度 ${completed}/${total} · 当前层 ${primitiveIndex + 1}/${layer.result.primitives.length}`);
 				if (primitive.kind === 'flash' && isCopperFlashAtDrill(reconstruction, layer.layerId, primitive)) {
 					if (layer.layerId >= 15 && layer.layerId <= 44)
 						skippedInnerCopperFlashes += 1;
@@ -455,6 +483,7 @@ export async function writePlan(plan: ImportPlan): Promise<WriteSummary> {
 						polygonGraphics.push({ source, points: flashOutlinePoints(primitive.position, primitive.shape) });
 				}
 				else {
+					await status(`处理区域轮廓（${primitive.points.length} 顶点）`);
 					try {
 						const simplified = simplifyClosedPolygon(primitive.points);
 						polygonGraphics.push({ source: polygonSource(simplified.points), points: simplified.points });
@@ -465,6 +494,7 @@ export async function writePlan(plan: ImportPlan): Promise<WriteSummary> {
 					}
 					catch (simplificationError) {
 						try {
+							await status(`安全简化未达要求，正在无损拆分 ${primitive.points.length} 顶点区域`);
 							const parts = partitionClosedPolygon(primitive.points);
 							partitionedRegions += 1;
 							partitionedRegionParts += parts.length;
@@ -477,8 +507,10 @@ export async function writePlan(plan: ImportPlan): Promise<WriteSummary> {
 						}
 					}
 				}
-				for (const graphic of polygonGraphics) {
-					const result = await createPolygonGraphic(layer.layerId, graphic.source, graphic.points, created);
+				for (const [graphicIndex, graphic] of polygonGraphics.entries()) {
+					if (polygonGraphics.length > 1)
+						await status(`写入拆分区域 ${graphicIndex + 1}/${polygonGraphics.length}`);
+					const result = await createPolygonGraphic(layer.layerId, graphic.source, graphic.points, created, status);
 					if (result.kind === 'converted')
 						convertedFills += 1;
 					if (result.kind === 'hatch') {
@@ -492,10 +524,15 @@ export async function writePlan(plan: ImportPlan): Promise<WriteSummary> {
 						flashFills += 1;
 				}
 			}
+			completed = layerStart + layer.result.primitives.length;
 		}
 		for (const drill of plan.drills) {
+			const drillStart = completed;
+			await notify(completed, total, `写入钻孔：${drill.fileName}`, true);
 			for (const [hitIndex, hit] of drill.result.hits.entries()) {
 				activeContext = `${drill.fileName} 第 ${hitIndex + 1} 个钻孔`;
+				completed = drillStart + hitIndex;
+				await notify(completed, total, `${activeContext} · 总进度 ${completed}/${total} · 当前文件 ${hitIndex + 1}/${drill.result.hits.length}`);
 				if (hit.plated === false) {
 					const id = primitiveId(await createNonPlatedHole(hit));
 					if (id) {
@@ -538,12 +575,15 @@ export async function writePlan(plan: ImportPlan): Promise<WriteSummary> {
 					tentedVias += 1;
 				}
 			}
+			completed = drillStart + drill.result.hits.length;
 		}
 	}
 	catch (error) {
+		await status('导入失败，正在回滚本次已创建的图元，请等待');
 		await rollback(created);
 		if (expandedCopperLayers) {
 			try {
+				await status('正在恢复原铜层数');
 				await eda.pcb_Layer.setTheNumberOfCopperLayers(copperLayerCountBefore as TPCB_NumberOfCopperLayers);
 			}
 			catch {}
@@ -551,6 +591,7 @@ export async function writePlan(plan: ImportPlan): Promise<WriteSummary> {
 		const message = error instanceof Error ? error.message : String(error);
 		throw new Error(`${activeContext}：${message}`);
 	}
+	await notify(total, total, `图元处理完成 ${total}/${total}`, true);
 	return {
 		copperLayerCountBefore,
 		copperLayerCountAfter,

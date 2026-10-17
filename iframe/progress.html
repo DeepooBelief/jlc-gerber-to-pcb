@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh-Hans">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Gerber 转 PCB · 导入进度</title>
+		<style>
+			* { box-sizing: border-box; }
+			body { margin: 0; padding: 24px; color: #172b4d; background: #f7f9fc; font: 14px/1.5 system-ui, sans-serif; }
+			.heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+			h1 { margin: 0; font-size: 19px; }
+			#percent { color: #1769df; font-size: 30px; font-weight: 700; }
+			progress { display: block; width: 100%; height: 16px; margin: 12px 0 20px; accent-color: #1769df; }
+			.label { color: #65758b; font-size: 12px; margin-bottom: 6px; }
+			#detail { min-height: 88px; max-height: 120px; overflow: auto; padding: 12px; background: white; border: 1px solid #dce3ed; border-radius: 8px; overflow-wrap: anywhere; white-space: pre-wrap; }
+			.footer { display: flex; justify-content: space-between; margin-top: 14px; color: #65758b; font-size: 12px; }
+			.note { margin-top: 12px; color: #65758b; font-size: 12px; }
+		</style>
+	</head>
+	<body>
+		<div class="heading"><h1>正在导入 Gerber</h1><span><small>整体进度 </small><strong id="percent">—</strong></span></div>
+		<progress id="bar" max="100" aria-label="导入进度"></progress>
+		<div class="label">当前文件 / 操作 / 处理数量</div>
+		<div id="detail" role="status">正在连接导入任务…</div>
+		<div class="footer"><span id="elapsed">已用时 0 秒</span><span id="connection">正在获取状态</span></div>
+		<div class="note">百分比按处理数量推进，复杂铺铜可能停留较久。关闭或最小化此窗口不会取消导入。</div>
+		<script>
+			const discoveryTopic = 'gerber-import-progress-discover-v2';
+			let topic;
+			let elapsedBaseMs = 0;
+			let elapsedBaseAt = performance.now();
+			let lastRevision = -1;
+			let displayedPercent = 0;
+			let refreshing = false;
+			let stopped = false;
+			async function refresh() {
+				if (stopped || refreshing) return;
+				refreshing = true;
+				try {
+					if (!topic) {
+						const discovered = await eda.sys_MessageBus.rpcCall(discoveryTopic, undefined, 2000);
+						if (stopped) return;
+						if (typeof discovered !== 'string' || !discovered.startsWith('gerber-import-progress-snapshot-'))
+							throw new Error('导入任务尚未就绪');
+						topic = discovered;
+					}
+					const state = await eda.sys_MessageBus.rpcCall(topic, undefined, 2000);
+					if (stopped) return;
+					if (state && Number.isFinite(state.percent) && typeof state.detail === 'string') {
+						const revision = Number.isFinite(state.revision) ? state.revision : state.updatedAt;
+						if (!Number.isFinite(revision) || revision < lastRevision)
+							return;
+						if (Number.isFinite(state.elapsedMs) && revision > lastRevision) {
+							const now = performance.now();
+							// Preserve locally elapsed time before replacing the snapshot anchor.
+							const elapsed = lastRevision < 0 ? 0 : elapsedBaseMs + Math.max(0, now - elapsedBaseAt);
+							elapsedBaseMs = Math.max(elapsed, state.elapsedMs);
+							elapsedBaseAt = now;
+							lastRevision = revision;
+						}
+						displayedPercent = Math.max(displayedPercent, Math.max(0, Math.min(99, state.percent)));
+						document.getElementById('percent').textContent = `${Math.floor(displayedPercent)}%`;
+						document.getElementById('bar').value = displayedPercent;
+						document.getElementById('detail').textContent = state.detail;
+						document.getElementById('connection').textContent = '已连接';
+					}
+				}
+				catch {
+					document.getElementById('connection').textContent = '等待任务响应…';
+				}
+				finally {
+					refreshing = false;
+					if (!stopped) setTimeout(refresh, 250);
+				}
+			}
+			const timer = setInterval(() => {
+				if (lastRevision >= 0) {
+					const seconds = Math.max(0, Math.floor((elapsedBaseMs + performance.now() - elapsedBaseAt) / 1000));
+					document.getElementById('elapsed').textContent = `已用时 ${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
+				}
+			}, 1000);
+			window.addEventListener('pagehide', () => { stopped = true; clearInterval(timer); });
+			refresh();
+		</script>
+	</body>
+</html>
