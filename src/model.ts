@@ -5,10 +5,11 @@ export interface Point {
 
 export type ApertureShape
 	= | { kind: 'circle'; diameter: number }
-		| { kind: 'rectangle'; width: number; height: number }
+		| { kind: 'rectangle'; width: number; height: number; rotation?: number }
 		| { kind: 'roundedRectangle'; width: number; height: number; radius: number; rotation: number }
 		| { kind: 'obround'; width: number; height: number }
-		| { kind: 'polygon'; diameter: number; vertices: number; rotation: number };
+		| { kind: 'polygon'; diameter: number; vertices: number; rotation: number }
+		| { kind: 'customPolygon'; points: Point[]; rotation: number };
 
 export interface Stroke {
 	kind: 'stroke';
@@ -23,6 +24,7 @@ export interface Flash {
 	kind: 'flash';
 	position: Point;
 	shape: ApertureShape;
+	apertureFunction?: string;
 }
 
 export interface Region {
@@ -42,6 +44,7 @@ export interface DrillHit {
 	position: Point;
 	diameter: number;
 	plated?: boolean;
+	drillFunction?: string;
 }
 
 export interface DrillParseResult {

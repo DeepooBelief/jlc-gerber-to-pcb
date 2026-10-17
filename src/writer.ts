@@ -1,6 +1,8 @@
 import type { ApertureShape, ImportPlan, Point } from './model.js';
-import { closedStrokeContours, explicitlyClosePolygon, hatchPolygon, roundedRectanglePercentage, simplifyClosedPolygon, strokePoints } from './geometry.js';
-import { buildReconstructionIndex, copperShapeAtDrill, hasMaskAtDrill, isCopperFlashAtDrill, isPadDerivedFlash } from './reconstruction.js';
+import type { ReconstructionIndex } from './reconstruction.js';
+import { closedStrokeContours, explicitlyClosePolygon, hatchPolygon, partitionClosedPolygon, rectanglePoints, roundedRectanglePercentage, simplifyClosedPolygon, strokePoints } from './geometry.js';
+import { copperLayerCountFromLayers, requiredCopperLayerCount } from './layers.js';
+import { buildReconstructionIndex, copperShapeAtDrill, hasMaskAtDrill, isCopperFlashAtDrill, isNativePadShape, isPadDerivedFlash, maskExpansionForPad } from './reconstruction.js';
 
 const MM_PER_MIL = 0.0254;
 
@@ -16,6 +18,17 @@ function isHatchLayer(layerId: number): boolean {
 	return isCopperLayer(layerId)
 		|| [3, 4, 5, 6, 7, 8, 9, 10, 13, 14, 56].includes(layerId)
 		|| (layerId >= 71 && layerId <= 100);
+}
+
+async function readCopperLayerCount(): Promise<number> {
+	try {
+		const directCount = await eda.pcb_Layer.getTheNumberOfCopperLayers();
+		if (Number.isInteger(directCount) && directCount >= 2)
+			return directCount;
+	}
+	catch {}
+	const layers = await eda.pcb_Layer.getAllLayers();
+	return copperLayerCountFromLayers(layers);
 }
 
 function polygonSource(points: Point[]): TPCB_PolygonSourceArray {
@@ -81,29 +94,36 @@ function roundedRectanglePoints(center: Point, width: number, height: number, ra
 function flashOutlinePoints(position: Point, shape: ApertureShape): Point[] {
 	if (shape.kind === 'circle')
 		return regularPolygon(position, shape.diameter, 64);
-	if (shape.kind === 'rectangle') {
-		return [
-			{ x: position.x - shape.width / 2, y: position.y - shape.height / 2 },
-			{ x: position.x + shape.width / 2, y: position.y - shape.height / 2 },
-			{ x: position.x + shape.width / 2, y: position.y + shape.height / 2 },
-			{ x: position.x - shape.width / 2, y: position.y + shape.height / 2 },
-		];
-	}
+	if (shape.kind === 'rectangle')
+		return rectanglePoints(position, shape.width, shape.height, shape.rotation ?? 0);
 	if (shape.kind === 'roundedRectangle')
 		return roundedRectanglePoints(position, shape.width, shape.height, shape.radius, shape.rotation);
 	if (shape.kind === 'obround')
 		return obroundPoints(position, shape.width, shape.height);
+	if (shape.kind === 'customPolygon') {
+		const rotationRadians = shape.rotation * Math.PI / 180;
+		return shape.points.map(point => ({
+			x: position.x + point.x * Math.cos(rotationRadians) - point.y * Math.sin(rotationRadians),
+			y: position.y + point.x * Math.sin(rotationRadians) + point.y * Math.cos(rotationRadians),
+		}));
+	}
 	return regularPolygon(position, shape.diameter, shape.vertices, shape.rotation);
 }
 
 function shapePolygon(position: Point, shape: ApertureShape): TPCB_PolygonSourceArray | undefined {
 	if (shape.kind === 'circle')
 		return ['CIRCLE', mil(position.x), mil(position.y), mil(shape.diameter / 2)];
-	if (shape.kind === 'rectangle')
-		return ['R', mil(position.x - shape.width / 2), mil(position.y - shape.height / 2), mil(shape.width), mil(shape.height), 0, 0];
+	if (shape.kind === 'rectangle') {
+		const points = rectanglePoints(position, shape.width, shape.height, shape.rotation ?? 0);
+		return shape.rotation
+			? polygonSource(points)
+			: ['R', mil(points[0].x), mil(points[0].y), mil(shape.width), mil(shape.height), 0, 0];
+	}
 	if (shape.kind === 'roundedRectangle')
 		return polygonSource(flashOutlinePoints(position, shape));
 	if (shape.kind === 'obround')
+		return polygonSource(flashOutlinePoints(position, shape));
+	if (shape.kind === 'customPolygon')
 		return polygonSource(flashOutlinePoints(position, shape));
 	return polygonSource(flashOutlinePoints(position, shape));
 }
@@ -117,17 +137,46 @@ function padShape(shape: ApertureShape): TPCB_PrimitivePadShape {
 		return [EPCB_PrimitivePadShapeType.RECTANGLE, mil(shape.width), mil(shape.height), roundedRectanglePercentage(shape.width, shape.height, shape.radius)];
 	if (shape.kind === 'obround')
 		return [EPCB_PrimitivePadShapeType.OBLONG, mil(shape.width), mil(shape.height)];
+	if (shape.kind === 'customPolygon')
+		return [EPCB_PrimitivePadShapeType.POLYLINE_COMPLEX_POLYGON, polygonSource(shape.points)];
 	return [EPCB_PrimitivePadShapeType.REGULAR_POLYGON, mil(shape.diameter), shape.vertices];
 }
 
 function shapeRotation(shape: ApertureShape): number {
-	return shape.kind === 'polygon' || shape.kind === 'roundedRectangle' ? shape.rotation : 0;
+	return shape.kind === 'rectangle' || shape.kind === 'polygon' || shape.kind === 'roundedRectangle' || shape.kind === 'customPolygon' ? shape.rotation ?? 0 : 0;
 }
 
 function shapeOuterDiameter(shape: ApertureShape): number {
 	if (shape.kind === 'circle' || shape.kind === 'polygon')
 		return shape.diameter;
+	if (shape.kind === 'customPolygon')
+		return 2 * Math.max(...shape.points.map(point => Math.hypot(point.x, point.y)));
 	return Math.max(shape.width, shape.height);
+}
+
+function shapeMinimumSpan(shape: ApertureShape): number {
+	if (shape.kind === 'circle' || shape.kind === 'polygon')
+		return shape.diameter;
+	if (shape.kind === 'customPolygon') {
+		const xs = shape.points.map(point => point.x);
+		const ys = shape.points.map(point => point.y);
+		return Math.min(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+	}
+	return Math.min(shape.width, shape.height);
+}
+
+function closedMaskExpansion(shape: ApertureShape): number {
+	return -mil(shapeMinimumSpan(shape) / 2);
+}
+
+function throughHoleMaskExpansion(index: ReconstructionIndex, position: Point, shape: ApertureShape): IPCB_PrimitiveSolderMaskAndPasteMaskExpansion {
+	const collapsed = closedMaskExpansion(shape);
+	const top = maskExpansionForPad(index, 1, position, shape);
+	const bottom = maskExpansionForPad(index, 2, position, shape);
+	return {
+		topSolderMask: top === undefined ? collapsed : mil(top),
+		bottomSolderMask: bottom === undefined ? collapsed : mil(bottom),
+	};
 }
 
 interface CreatedIds {
@@ -166,6 +215,8 @@ async function rollback(created: CreatedIds): Promise<void> {
 }
 
 export interface WriteSummary {
+	copperLayerCountBefore: number;
+	copperLayerCountAfter: number;
 	lines: number;
 	arcs: number;
 	pads: number;
@@ -184,6 +235,8 @@ export interface WriteSummary {
 	vias: number;
 	simplifiedRegions: number;
 	maximumSimplificationMicrometers: number;
+	partitionedRegions: number;
+	partitionedRegionParts: number;
 }
 
 async function createAbsoluteHatch(layerId: number, points: Point[], created: CreatedIds): Promise<number> {
@@ -244,6 +297,42 @@ async function createConvertedFill(layerId: number, polygon: IPCB_Polygon, creat
 	return fillId;
 }
 
+interface PolygonWriteResult {
+	kind: 'fill' | 'converted' | 'hatch';
+	hatchLines: number;
+}
+
+async function createPolygonGraphic(layerId: number, source: TPCB_PolygonSourceArray, fallbackPoints: Point[], created: CreatedIds): Promise<PolygonWriteResult> {
+	const polygon = eda.pcb_MathPolygon.createPolygon(source);
+	if (!polygon)
+		throw new Error('无法创建多边形。');
+	let fillError: unknown;
+	try {
+		const fillId = primitiveId(isCopperLayer(layerId)
+			? await eda.pcb_PrimitiveFill.create(layerId as TPCB_LayersOfFill, polygon, '')
+			: await eda.pcb_PrimitiveFill.create(layerId as TPCB_LayersOfFill, polygon));
+		if (fillId) {
+			created.fills.push(fillId);
+			return { kind: 'fill', hatchLines: 0 };
+		}
+	}
+	catch (error) {
+		fillError = error;
+	}
+	try {
+		if (await createConvertedFill(layerId, polygon, created))
+			return { kind: 'converted', hatchLines: 0 };
+	}
+	catch {}
+	if (isHatchLayer(layerId)) {
+		const hatchLines = await createAbsoluteHatch(layerId, fallbackPoints, created);
+		if (hatchLines)
+			return { kind: 'hatch', hatchLines };
+	}
+	const fillMessage = fillError instanceof Error ? fillError.message : '填充接口返回空结果';
+	throw new Error(`普通填充失败，且当前图层无法完成绝对坐标扫描回退：${fillMessage}`);
+}
+
 export async function writePlan(plan: ImportPlan): Promise<WriteSummary> {
 	const created: CreatedIds = { lines: [], arcs: [], pads: [], fills: [], polylines: [], vias: [] };
 	const reconstruction = buildReconstructionIndex(plan);
@@ -261,7 +350,25 @@ export async function writePlan(plan: ImportPlan): Promise<WriteSummary> {
 	let skippedInnerCopperFlashes = 0;
 	let throughHolePads = 0;
 	let tentedVias = 0;
+	let partitionedRegions = 0;
+	let partitionedRegionParts = 0;
+	let copperLayerCountBefore = 2;
+	let copperLayerCountAfter = 2;
+	let expandedCopperLayers = false;
 	try {
+		activeContext = '检查当前 PCB 铜层叠层';
+		copperLayerCountBefore = await readCopperLayerCount();
+		copperLayerCountAfter = copperLayerCountBefore;
+		const requiredLayers = requiredCopperLayerCount(plan);
+		if (copperLayerCountBefore < requiredLayers) {
+			activeContext = `将当前 PCB 从 ${copperLayerCountBefore} 层扩展为 ${requiredLayers} 层`;
+			if (!await eda.pcb_Layer.setTheNumberOfCopperLayers(requiredLayers))
+				throw new Error('无法调整当前 PCB 的铜层数，请先在层叠管理器中手动设置。');
+			expandedCopperLayers = true;
+			copperLayerCountAfter = await readCopperLayerCount();
+			if (copperLayerCountAfter < requiredLayers)
+				throw new Error(`层数调整后读回为 ${copperLayerCountAfter} 层，未达到 Gerber 所需的 ${requiredLayers} 层。`);
+		}
 		for (const layer of plan.layers) {
 			if (layer.layerId === 11) {
 				activeContext = `${layer.fileName}（EDA 板框层）`;
@@ -288,12 +395,12 @@ export async function writePlan(plan: ImportPlan): Promise<WriteSummary> {
 			}
 			for (const [primitiveIndex, primitive] of layer.result.primitives.entries()) {
 				activeContext = `${layer.fileName}（EDA 图层 ${layer.layerId}）第 ${primitiveIndex + 1} 个 ${primitive.kind} 图元`;
-				if (primitive.kind === 'flash' && isCopperFlashAtDrill(reconstruction, layer.layerId, primitive.position)) {
+				if (primitive.kind === 'flash' && isCopperFlashAtDrill(reconstruction, layer.layerId, primitive)) {
 					if (layer.layerId >= 15 && layer.layerId <= 44)
 						skippedInnerCopperFlashes += 1;
 					continue;
 				}
-				if (primitive.kind === 'flash' && isPadDerivedFlash(reconstruction, layer.layerId, primitive.position)) {
+				if (primitive.kind === 'flash' && isPadDerivedFlash(reconstruction, layer.layerId, primitive)) {
 					skippedDerivedFlashes += 1;
 					continue;
 				}
@@ -315,73 +422,49 @@ export async function writePlan(plan: ImportPlan): Promise<WriteSummary> {
 						(primitive.arcAngle === undefined ? created.lines : created.arcs).push(id);
 					continue;
 				}
-				if (primitive.kind === 'flash' && (layer.layerId === 1 || layer.layerId === 2)) {
-					const id = primitiveId(await eda.pcb_PrimitivePad.create(layer.layerId as TPCB_LayersOfPad, '', mil(primitive.position.x), mil(primitive.position.y), shapeRotation(primitive.shape), padShape(primitive.shape), '', null, 0, 0, 0, false, 0, undefined, null, null, false));
-					if (id)
-						created.pads.push(id);
-					continue;
-				}
-				let source: TPCB_PolygonSourceArray | undefined;
-				let simplifiedRegionPoints: Point[] | undefined;
+				const polygonGraphics: Array<{ source: TPCB_PolygonSourceArray; points: Point[] }> = [];
 				if (primitive.kind === 'flash') {
-					source = shapePolygon(primitive.position, primitive.shape);
+					const source = shapePolygon(primitive.position, primitive.shape);
+					if (source)
+						polygonGraphics.push({ source, points: flashOutlinePoints(primitive.position, primitive.shape) });
 				}
 				else {
-					const simplified = simplifyClosedPolygon(primitive.points);
-					simplifiedRegionPoints = simplified.points;
-					source = polygonSource(simplifiedRegionPoints);
-					if (simplified.toleranceMm > 0) {
-						simplifiedRegions += 1;
-						maximumSimplificationMicrometers = Math.max(maximumSimplificationMicrometers, simplified.toleranceMm * 1000);
+					try {
+						const simplified = simplifyClosedPolygon(primitive.points);
+						polygonGraphics.push({ source: polygonSource(simplified.points), points: simplified.points });
+						if (simplified.toleranceMm > 0) {
+							simplifiedRegions += 1;
+							maximumSimplificationMicrometers = Math.max(maximumSimplificationMicrometers, simplified.toleranceMm * 1000);
+						}
+					}
+					catch (simplificationError) {
+						try {
+							const parts = partitionClosedPolygon(primitive.points);
+							partitionedRegions += 1;
+							partitionedRegionParts += parts.length;
+							polygonGraphics.push(...parts.map(points => ({ source: polygonSource(points), points })));
+						}
+						catch (partitionError) {
+							const simplificationMessage = simplificationError instanceof Error ? simplificationError.message : String(simplificationError);
+							const partitionMessage = partitionError instanceof Error ? partitionError.message : String(partitionError);
+							throw new Error(`${simplificationMessage}；无损拆分也失败：${partitionMessage}`);
+						}
 					}
 				}
-				if (!source)
-					continue;
-				const polygon = eda.pcb_MathPolygon.createPolygon(source);
-				if (!polygon)
-					throw new Error(`无法创建 ${layer.fileName} 中的多边形。`);
-				let fillId: string | undefined;
-				let fillError: unknown;
-				try {
-					fillId = primitiveId(isCopperLayer(layer.layerId)
-						? await eda.pcb_PrimitiveFill.create(layer.layerId as TPCB_LayersOfFill, polygon, '')
-						: await eda.pcb_PrimitiveFill.create(layer.layerId as TPCB_LayersOfFill, polygon));
-				}
-				catch (error) {
-					fillError = error;
-				}
-				if (fillId) {
-					created.fills.push(fillId);
+				for (const graphic of polygonGraphics) {
+					const result = await createPolygonGraphic(layer.layerId, graphic.source, graphic.points, created);
+					if (result.kind === 'converted')
+						convertedFills += 1;
+					if (result.kind === 'hatch') {
+						hatchFallbackPrimitives += 1;
+						hatchFallbackLines += result.hatchLines;
+						continue;
+					}
 					if (primitive.kind === 'region')
 						regionFills += 1;
 					else
 						flashFills += 1;
-					continue;
 				}
-				try {
-					if (await createConvertedFill(layer.layerId, polygon, created)) {
-						convertedFills += 1;
-						if (primitive.kind === 'region')
-							regionFills += 1;
-						else
-							flashFills += 1;
-						continue;
-					}
-				}
-				catch {}
-				if (isHatchLayer(layer.layerId)) {
-					const points = primitive.kind === 'flash'
-						? flashOutlinePoints(primitive.position, primitive.shape)
-						: simplifiedRegionPoints ?? primitive.points;
-					const hatchLines = await createAbsoluteHatch(layer.layerId, points, created);
-					if (hatchLines) {
-						hatchFallbackPrimitives += 1;
-						hatchFallbackLines += hatchLines;
-						continue;
-					}
-				}
-				const fillMessage = fillError instanceof Error ? fillError.message : '填充接口返回空结果';
-				throw new Error(`普通填充失败，且当前图层无法完成绝对坐标扫描回退：${fillMessage}`);
 			}
 		}
 		for (const drill of plan.drills) {
@@ -396,15 +479,23 @@ export async function writePlan(plan: ImportPlan): Promise<WriteSummary> {
 					}
 					continue;
 				}
-				const copperShape = copperShapeAtDrill(reconstruction, hit.position);
+				const copperShape = copperShapeAtDrill(reconstruction, hit.position, hit.drillFunction);
 				const annularDiameter = copperShape
 					? shapeOuterDiameter(copperShape)
 					: Math.max(hit.diameter + 0.3, hit.diameter * 1.5);
-				if (copperShape && hasMaskAtDrill(reconstruction, hit.position)) {
+				const drillFunction = hit.drillFunction?.toLowerCase();
+				const knownVia = drillFunction === 'viadrill';
+				const knownComponent = drillFunction === 'componentdrill';
+				if (knownComponent || (!knownVia && copperShape && hasMaskAtDrill(reconstruction, hit.position))) {
+					const throughHoleShape: ApertureShape = copperShape && isNativePadShape(copperShape)
+						? copperShape
+						: { kind: 'circle', diameter: annularDiameter };
 					const diameter = mil(hit.diameter);
-					const id = primitiveId(await eda.pcb_PrimitivePad.create(12, '', mil(hit.position.x), mil(hit.position.y), shapeRotation(copperShape), padShape(copperShape), '', [EPCB_PrimitivePadHoleType.ROUND, diameter], 0, 0, 0, true, EPCB_PrimitivePadType.NORMAL, undefined, null, null, false));
-					if (id)
+					const id = primitiveId(await eda.pcb_PrimitivePad.create(12, '', mil(hit.position.x), mil(hit.position.y), shapeRotation(throughHoleShape), padShape(throughHoleShape), '', [EPCB_PrimitivePadHoleType.ROUND, diameter], 0, 0, 0, true, EPCB_PrimitivePadType.NORMAL, undefined, throughHoleMaskExpansion(reconstruction, hit.position, throughHoleShape), null, false));
+					if (id) {
 						created.pads.push(id);
+						throughHolePads += 1;
+					}
 					continue;
 				}
 				const coverOilExpansion = -mil(annularDiameter / 2);
@@ -421,10 +512,18 @@ export async function writePlan(plan: ImportPlan): Promise<WriteSummary> {
 	}
 	catch (error) {
 		await rollback(created);
+		if (expandedCopperLayers) {
+			try {
+				await eda.pcb_Layer.setTheNumberOfCopperLayers(copperLayerCountBefore as TPCB_NumberOfCopperLayers);
+			}
+			catch {}
+		}
 		const message = error instanceof Error ? error.message : String(error);
 		throw new Error(`${activeContext}：${message}`);
 	}
 	return {
+		copperLayerCountBefore,
+		copperLayerCountAfter,
 		lines: created.lines.length,
 		arcs: created.arcs.length,
 		pads: created.pads.length,
@@ -443,5 +542,7 @@ export async function writePlan(plan: ImportPlan): Promise<WriteSummary> {
 		vias: created.vias.length,
 		simplifiedRegions,
 		maximumSimplificationMicrometers,
+		partitionedRegions,
+		partitionedRegionParts,
 	};
 }

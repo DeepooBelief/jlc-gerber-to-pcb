@@ -10,9 +10,10 @@ function parseCoordinate(raw: string, metric: boolean): number {
 export function parseExcellon(source: string): DrillParseResult {
 	const hits: DrillParseResult['hits'] = [];
 	const warnings: string[] = [];
-	const tools = new Map<number, number>();
+	const tools = new Map<number, { diameter: number; drillFunction?: string }>();
 	let metric = true;
 	let currentTool: number | undefined;
+	let pendingDrillFunction: string | undefined;
 	let x = 0;
 	let y = 0;
 	const plated = /TF\.FileFunction,NonPlated/i.test(source)
@@ -21,7 +22,14 @@ export function parseExcellon(source: string): DrillParseResult {
 
 	for (const rawLine of source.replaceAll('\r', '').split(/[\n*]+/)) {
 		const line = rawLine.trim().toUpperCase();
-		if (!line || line.startsWith(';'))
+		if (!line)
+			continue;
+		const toolFunction = /TA\.APERFUNCTION,[^\r\n]*,(VIADRILL|COMPONENTDRILL)(?:,|$)/i.exec(line);
+		if (toolFunction) {
+			pendingDrillFunction = toolFunction[1] === 'VIADRILL' ? 'ViaDrill' : 'ComponentDrill';
+			continue;
+		}
+		if (line.startsWith(';'))
 			continue;
 		if (line.includes('METRIC') || line === 'M71') {
 			metric = true;
@@ -33,7 +41,11 @@ export function parseExcellon(source: string): DrillParseResult {
 		}
 		const definition = /^T(\d+)C([0-9.]+)/.exec(line);
 		if (definition) {
-			tools.set(Number(definition[1]), Number(definition[2]) * (metric ? 1 : 25.4));
+			tools.set(Number(definition[1]), {
+				diameter: Number(definition[2]) * (metric ? 1 : 25.4),
+				...(pendingDrillFunction ? { drillFunction: pendingDrillFunction } : {}),
+			});
+			pendingDrillFunction = undefined;
 			continue;
 		}
 		const selection = /^T(\d+)$/.exec(line);
@@ -52,12 +64,17 @@ export function parseExcellon(source: string): DrillParseResult {
 			x = parseCoordinate(xMatch[1], metric);
 		if (yMatch)
 			y = parseCoordinate(yMatch[1], metric);
-		const diameter = currentTool === undefined ? undefined : tools.get(currentTool);
-		if (diameter === undefined) {
+		const tool = currentTool === undefined ? undefined : tools.get(currentTool);
+		if (!tool) {
 			warnings.push(`钻孔坐标引用了未定义刀具 T${currentTool ?? '?'}，已跳过。`);
 			continue;
 		}
-		hits.push({ position: { x, y }, diameter, plated });
+		hits.push({
+			position: { x, y },
+			diameter: tool.diameter,
+			plated,
+			...(tool.drillFunction ? { drillFunction: tool.drillFunction } : {}),
+		});
 	}
 	return { hits, plated, warnings: [...new Set(warnings)] };
 }

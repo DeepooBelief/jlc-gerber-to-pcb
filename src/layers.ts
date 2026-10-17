@@ -1,3 +1,5 @@
+import type { ImportPlan } from './model.js';
+
 const LAYER = {
 	top: 1,
 	bottom: 2,
@@ -79,4 +81,25 @@ export function guessLayer(fileName: string, fileFunction?: string): LayerGuess 
 
 export function isDrillFile(fileName: string): boolean {
 	return /\.(?:drl|drd|xln|tap|exc|txt)$/.test(fileName.toLowerCase()) || /drill|pth|npth/i.test(fileName);
+}
+
+export function requiredCopperLayerCount(plan: ImportPlan): TPCB_NumberOfCopperLayers {
+	let required = 2;
+	for (const layer of plan.layers) {
+		const attributedLayer = /^copper,l(\d+),(?:top|bot|inr)/i.exec(layer.result.fileFunction ?? '');
+		if (attributedLayer)
+			required = Math.max(required, Number(attributedLayer[1]));
+		if (layer.layerId >= LAYER.inner1 && layer.layerId <= 44)
+			required = Math.max(required, layer.layerId - LAYER.inner1 + 3);
+	}
+	const supported = Math.min(32, Math.max(2, Math.ceil(required / 2) * 2));
+	return supported as TPCB_NumberOfCopperLayers;
+}
+
+export function copperLayerCountFromLayers(layers: Array<{ id: number; type?: string; layerStatus?: number }>): number {
+	return new Set(layers
+		.filter(layer => layer.layerStatus !== 0)
+		.filter(layer => layer.type === 'SIGNAL' || layer.type === 'PLANE')
+		.map(layer => layer.id)
+		.filter(layerId => layerId === LAYER.top || layerId === LAYER.bottom || (layerId >= LAYER.inner1 && layerId <= 44))).size;
 }

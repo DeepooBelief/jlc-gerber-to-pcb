@@ -1,7 +1,7 @@
 {
 	"name": "jlc-gerber-to-pcb",
 	"type": "module",
-	"version": "0.6.0",
+	"version": "0.6.1",
 	"description": "Import RS-274X Gerber and Excellon drill files as editable EasyEDA Pro PCB primitives",
 	"author": "Will",
 	"license": "Apache-2.0",
@@ -25,6 +25,9 @@
 		"update": "ts-node ./build/update.ts update && npm install",
 		"manifest:generate": "npm install && ts-node ./build/manifest.ts generate",
 		"manifest:bump": "npm install && ts-node ./build/manifest.ts bump && npm install"
+	},
+	"dependencies": {
+		"earcut": "^3.2.3"
 	},
 	"devDependencies": {
 		"@antfu/eslint-config": "^5.4.1",
