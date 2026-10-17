@@ -421,7 +421,7 @@ export async function writePlan(plan: ImportPlan, report?: ReportProgress): Prom
 			for (const [primitiveIndex, primitive] of layer.result.primitives.entries()) {
 				activeContext = `${layer.fileName}（EDA 图层 ${layer.layerId}）第 ${primitiveIndex + 1} 个 ${primitive.kind} 图元`;
 				completed = layerStart + primitiveIndex;
-				await notify(completed, total, `${activeContext} · 本层 ${primitiveIndex + 1}/${layer.result.primitives.length} · 总计已处理 ${completed}/${total}`);
+				await notify(completed, total, `${activeContext} · 总进度 ${completed}/${total} · 当前层 ${primitiveIndex + 1}/${layer.result.primitives.length}`);
 				if (primitive.kind === 'flash' && isCopperFlashAtDrill(reconstruction, layer.layerId, primitive)) {
 					if (layer.layerId >= 15 && layer.layerId <= 44)
 						skippedInnerCopperFlashes += 1;
@@ -505,7 +505,7 @@ export async function writePlan(plan: ImportPlan, report?: ReportProgress): Prom
 			for (const [hitIndex, hit] of drill.result.hits.entries()) {
 				activeContext = `${drill.fileName} 第 ${hitIndex + 1} 个钻孔`;
 				completed = drillStart + hitIndex;
-				await notify(completed, total, `${activeContext} · 本文件 ${hitIndex + 1}/${drill.result.hits.length} · 总计已处理 ${completed}/${total}`);
+				await notify(completed, total, `${activeContext} · 总进度 ${completed}/${total} · 当前文件 ${hitIndex + 1}/${drill.result.hits.length}`);
 				if (hit.plated === false) {
 					const diameter = mil(hit.diameter);
 					const id = primitiveId(await eda.pcb_PrimitivePad.create(12, '', mil(hit.position.x), mil(hit.position.y), 0, [EPCB_PrimitivePadShapeType.ELLIPSE, diameter, diameter], '', [EPCB_PrimitivePadHoleType.ROUND, diameter], 0, 0, 0, false, EPCB_PrimitivePadType.NORMAL, undefined, null, null, false));
