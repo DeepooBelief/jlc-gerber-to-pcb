@@ -1,0 +1,46 @@
+name: Close inactive issues
+
+on:
+  schedule:
+    - cron: '23 23 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Preview changes without commenting, labeling or closing issues'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+concurrency:
+  group: stale-issues
+  cancel-in-progress: false
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Remind and close inactive issues
+        uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93 # v11.0.0
+        with:
+          days-before-issue-stale: 7
+          days-before-issue-close: 7
+          days-before-pr-stale: -1
+          days-before-pr-close: -1
+          stale-issue-label: stale
+          exempt-issue-labels: keep-open
+          remove-issue-stale-when-updated: true
+          close-issue-reason: not_planned
+          stale-issue-message: |
+            此 Issue 已连续 7 天没有更新。如果问题仍然存在，请补充最新版本的复测结果或相关信息。
+            若再过 7 天仍无更新，将自动关闭以整理待处理列表。关闭不表示问题已修复；有新信息时可重新打开，或新建 Issue 并关联本帖。
+            仍需持续跟进的问题，维护者可添加 `keep-open` 标签以保留。
+          close-issue-message: |
+            提醒后又过了 7 天，仍未收到更新，因此自动关闭此 Issue。
+            如果问题仍然存在，欢迎补充信息并重新打开，或新建 Issue 并关联本帖。
+          operations-per-run: 100
+          debug-only: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
