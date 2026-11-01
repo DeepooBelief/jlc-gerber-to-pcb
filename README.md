@@ -22,7 +22,7 @@ Gerber 只包含最终制造图形，不包含原理图、器件/封装归属、
 ## 安装与使用
 
 1. 在嘉立创 EDA 专业版 V3 打开一个 PCB 文档。
-2. 进入“高级 → 扩展管理器 → 导入”，选择 `gerber-to-pcb_v0.7.0.eext`。若已安装同 UUID 的旧测试版，请先卸载旧版并完全退出、重启嘉立创 EDA，再导入新包。
+2. 进入“高级 → 扩展管理器 → 导入”，选择 `gerber-to-pcb_v0.7.1.eext`。若已安装同 UUID 的旧测试版，请先卸载旧版并完全退出、重启嘉立创 EDA，再导入新包。
 3. 新建空白 PCB；扩展只追加图元，不会自动清除当前 PCB 中已有的导入结果。在 PCB 顶部菜单选择“Gerber 转 PCB → 导入 Gerber / 钻孔文件...”。
 4. 选择多个制造文件，或直接选择一个 Gerber ZIP 包。
 5. 检查预览中的文件、目标层与图元数量，确认后写入当前 PCB。
@@ -111,11 +111,11 @@ npm run build
 3. 构建 `.eext` 安装包。
 4. 创建同名 GitHub Release，并上传 `.eext` 和 SHA-256 校验文件。
 
-例如，确认 `package.json` 与 `extension.json` 的版本均为 `0.7.0` 后：
+例如，确认 `package.json` 与 `extension.json` 的版本均为 `0.7.1` 后：
 
 ```shell
-git tag v0.7.0
-git push origin v0.7.0
+git tag v0.7.1
+git push origin v0.7.1
 ```
 
 普通分支 push 不会创建 Release；源码仓库本身也不会提交 `.eext` 二进制文件。
