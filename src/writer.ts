@@ -183,6 +183,7 @@ function throughHoleMaskExpansion(index: ReconstructionIndex, position: Point, s
 
 interface CreatedIds {
 	lines: string[];
+	graphicLineSegments: number;
 	arcs: string[];
 	pads: string[];
 	fills: string[];
@@ -192,6 +193,33 @@ interface CreatedIds {
 
 function primitiveId(primitive: IPCB_Primitive | undefined): string | undefined {
 	return primitive?.getState_PrimitiveId();
+}
+
+/** Non-copper artwork is a graphic path, not a routed copper line. */
+async function createLinePath(layerId: number, points: Point[], widthMm: number, created: CreatedIds): Promise<void> {
+	if (points.length < 2 || !points.every(point => Number.isFinite(point.x) && Number.isFinite(point.y)) || !Number.isFinite(widthMm) || widthMm <= 0)
+		throw new Error('线条坐标或线宽无效。');
+	if (isCopperLayer(layerId)) {
+		if (points.length !== 2)
+			throw new Error('铜层直线必须提供两个端点。');
+		const id = primitiveId(await eda.pcb_PrimitiveLine.create('', layerId as TPCB_LayersOfLine, mil(points[0].x), mil(points[0].y), mil(points[1].x), mil(points[1].y), mil(widthMm), false));
+		if (!id)
+			throw new Error('无法创建铜层直线图元。');
+		created.lines.push(id);
+		return;
+	}
+	// Keep the path open: closing a semicircle would add an unintended diameter.
+	const source: TPCB_PolygonSourceArray = [mil(points[0].x), mil(points[0].y), 'L'];
+	for (const point of points.slice(1))
+		source.push(mil(point.x), mil(point.y));
+	const polygon = eda.pcb_MathPolygon.createPolygon(source);
+	if (!polygon)
+		throw new Error('无法创建非铜层图形路径。');
+	const id = primitiveId(await eda.pcb_PrimitivePolyline.create('', layerId as TPCB_LayersOfLine, polygon, mil(widthMm), false));
+	if (!id)
+		throw new Error('无法创建非铜层图形折线。');
+	created.polylines.push(id);
+	created.graphicLineSegments += points.length - 1;
 }
 
 async function deleteCreated(ids: string[], deleter: (ids: string | string[]) => Promise<boolean>): Promise<void> {
@@ -249,23 +277,7 @@ async function createAbsoluteHatch(layerId: number, points: Point[], created: Cr
 	for (let offset = 0; offset < segments.length; offset += batchSize) {
 		await status(`扫描线回退 ${offset}/${segments.length}`);
 		const batch = segments.slice(offset, offset + batchSize);
-		const results = await Promise.allSettled(batch.map(segment => eda.pcb_PrimitiveLine.create(
-			'',
-			layerId as TPCB_LayersOfLine,
-			mil(segment.start.x),
-			mil(segment.start.y),
-			mil(segment.end.x),
-			mil(segment.end.y),
-			mil(segment.width),
-			false,
-		)));
-		for (const result of results) {
-			if (result.status === 'fulfilled') {
-				const id = primitiveId(result.value);
-				if (id)
-					created.lines.push(id);
-			}
-		}
+		const results = await Promise.allSettled(batch.map(segment => createLinePath(layerId, [segment.start, segment.end], segment.width, created)));
 		const failure = results.find(result => result.status === 'rejected');
 		if (failure?.status === 'rejected')
 			throw failure.reason;
@@ -341,7 +353,7 @@ async function createPolygonGraphic(layerId: number, source: TPCB_PolygonSourceA
 }
 
 export async function writePlan(plan: ImportPlan, report?: ReportProgress): Promise<WriteSummary> {
-	const created: CreatedIds = { lines: [], arcs: [], pads: [], fills: [], polylines: [], vias: [] };
+	const created: CreatedIds = { lines: [], graphicLineSegments: 0, arcs: [], pads: [], fills: [], polylines: [], vias: [] };
 	const total = plan.layers.reduce((sum, layer) => sum + layer.result.primitives.length, 0)
 		+ plan.drills.reduce((sum, drill) => sum + drill.result.hits.length, 0);
 	let completed = 0;
@@ -433,11 +445,7 @@ export async function writePlan(plan: ImportPlan, report?: ReportProgress): Prom
 				for (const stroke of openStrokes) {
 					await status('保留开放板框/机械路径');
 					const points = stroke.arcAngle === undefined ? [stroke.start, stroke.end] : strokePoints(stroke);
-					for (let index = 1; index < points.length; index += 1) {
-						const id = primitiveId(await eda.pcb_PrimitiveLine.create('', 11, mil(points[index - 1].x), mil(points[index - 1].y), mil(points[index].x), mil(points[index].y), Math.max(0.1, mil(stroke.width)), false));
-						if (id)
-							created.lines.push(id);
-					}
+					await createLinePath(11, points, Math.max(0.00254, stroke.width), created);
 					if (stroke.arcAngle !== undefined)
 						linearizedArcs += 1;
 				}
@@ -459,14 +467,10 @@ export async function writePlan(plan: ImportPlan, report?: ReportProgress): Prom
 					continue;
 				}
 				if (primitive.kind === 'stroke') {
-					if (primitive.arcAngle !== undefined && !isCopperLayer(layer.layerId)) {
-						const points = strokePoints(primitive);
-						for (let index = 1; index < points.length; index += 1) {
-							const id = primitiveId(await eda.pcb_PrimitiveLine.create('', layer.layerId as TPCB_LayersOfLine, mil(points[index - 1].x), mil(points[index - 1].y), mil(points[index].x), mil(points[index].y), Math.max(0.1, mil(primitive.width)), false));
-							if (id)
-								created.lines.push(id);
-						}
-						linearizedArcs += 1;
+					if (!isCopperLayer(layer.layerId)) {
+						await createLinePath(layer.layerId, strokePoints(primitive), Math.max(0.00254, primitive.width), created);
+						if (primitive.arcAngle !== undefined)
+							linearizedArcs += 1;
 						continue;
 					}
 					const id = primitive.arcAngle === undefined
@@ -595,7 +599,7 @@ export async function writePlan(plan: ImportPlan, report?: ReportProgress): Prom
 	return {
 		copperLayerCountBefore,
 		copperLayerCountAfter,
-		lines: created.lines.length,
+		lines: created.lines.length + created.graphicLineSegments,
 		arcs: created.arcs.length,
 		pads: created.pads.length,
 		fills: created.fills.length,
